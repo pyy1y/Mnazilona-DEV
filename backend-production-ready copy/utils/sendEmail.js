@@ -10,10 +10,19 @@ const getTransporter = () => {
   if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
     throw new Error('EMAIL_USER and EMAIL_PASS must be set');
   }
-  transporter = nodemailer.createTransport({
-    service: 'gmail',
+
+  const smtpConfig = {
+    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+    port: parseInt(process.env.EMAIL_PORT, 10) || 465,
+    secure: process.env.EMAIL_SECURE !== 'false',
     auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-  });
+    tls: { rejectUnauthorized: false },
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
+  };
+
+  transporter = nodemailer.createTransport(smtpConfig);
   return transporter;
 };
 
@@ -34,6 +43,8 @@ const sendEmail = async (to, subject, text, options = {}) => {
     return result;
   } catch (error) {
     console.error(`Email failed to ${to}:`, error.message);
+    console.error(`SMTP Error Code: ${error.code || 'N/A'}, Command: ${error.command || 'N/A'}`);
+    console.error(`Response: ${error.response || 'N/A'}`);
     throw new Error('Failed to send email');
   }
 };
