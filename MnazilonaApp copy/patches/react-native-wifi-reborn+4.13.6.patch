@@ -1,0 +1,16 @@
+diff --git a/node_modules/react-native-wifi-reborn/src/index.js b/node_modules/react-native-wifi-reborn/src/index.js
+index e5d9581..e69a382 100644
+--- a/node_modules/react-native-wifi-reborn/src/index.js
++++ b/node_modules/react-native-wifi-reborn/src/index.js
+@@ -1,6 +1,9 @@
+-import { NativeModules } from 'react-native';
++import { NativeModules, TurboModuleRegistry } from 'react-native';
+ 
+-const { WifiManager } = NativeModules;
++const WifiManager =
++    TurboModuleRegistry?.get('WifiManager') ||
++    NativeModules?.WifiManager ||
++    null;
+ 
+ export const GET_CURRENT_WIFI_SSID_ERRRORS = {
+     CouldNotDetectSSID: 'CouldNotDetectSSID',
