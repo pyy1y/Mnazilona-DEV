@@ -2,7 +2,7 @@
 // ======================================
 // API Configuration
 // ======================================
-const DEV_API_URL = 'http://192.168.100.163:3000';
+const DEV_API_URL = 'http://91.98.207.169';
 //const PROD_API_URL = 'https://api.manazel.app';
 const isDev = __DEV__;
 
