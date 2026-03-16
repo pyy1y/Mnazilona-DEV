@@ -9,6 +9,7 @@ import DimmerCard from './DimmerCard';
 import WaterTankCard from './WaterTankCard';
 import ACCard from './ACCard';
 import SecurityCard from './SecurityCard';
+import LockCard from './LockCard';
 
 // ======================================
 // Types
@@ -80,6 +81,10 @@ const isSecurityDevice = (device: Device): boolean => {
   return device.deviceType === 'security';
 };
 
+const isLockDevice = (device: Device): boolean => {
+  return device.deviceType === 'lock';
+};
+
 const getDeviceDisplayName = (device: Device): string => {
   if (device.name && device.name.trim()) {
     return device.name.trim();
@@ -119,6 +124,7 @@ function DeviceListItem({
   const isWaterTank = useMemo(() => isWaterTankDevice(device), [device]);
   const isAC = useMemo(() => isACDevice(device), [device]);
   const isSecurity = useMemo(() => isSecurityDevice(device), [device]);
+  const isLock = useMemo(() => isLockDevice(device), [device]);
 
   const isLoading = useMemo(() => {
     if (!actionLoading) return false;
@@ -135,7 +141,24 @@ function DeviceListItem({
   // Determine which card to render
   let card: React.ReactNode = null;
 
-  if (isSecurity) {
+  if (isLock) {
+    card = (
+      <LockCard
+        name={displayName}
+        serialNumber={device.serialNumber}
+        macAddress={device.macAddress}
+        isOnline={device.isOnline}
+        isLoading={isLoading}
+        lockState={(device.state?.lockState as 'locked' | 'unlocked') || null}
+        batteryLevel={(device.state?.batteryLevel as number) || null}
+        onAction={(_serial, cmd) => onSendCommand(device.serialNumber, { action: cmd.action as any })}
+        onRename={onRenameDevice}
+        onFetchLogs={onFetchLogs}
+        brandColor={brandColor}
+        isDemo={true}
+      />
+    );
+  } else if (isSecurity) {
     card = (
       <SecurityCard
         name={displayName}

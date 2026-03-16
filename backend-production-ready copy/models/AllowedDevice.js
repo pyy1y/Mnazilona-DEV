@@ -18,7 +18,7 @@ const allowedDeviceSchema = new mongoose.Schema(
     },
     deviceType: {
       type: String,
-      enum: ['relay', 'sensor', 'switch', 'light', 'dimmer', 'water-tank', 'ac', 'security', 'other'],
+      enum: ['relay', 'sensor', 'switch', 'light', 'dimmer', 'water-tank', 'ac', 'security', 'lock', 'other'],
       default: 'relay',
     },
     firmwareVersion: { type: String, default: '1.0.0' },
