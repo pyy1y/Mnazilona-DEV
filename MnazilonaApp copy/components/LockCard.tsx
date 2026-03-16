@@ -15,7 +15,6 @@ import {
   KeyboardAvoidingView,
   Platform,
   Switch,
-  Dimensions,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
@@ -83,12 +82,12 @@ interface LockCardProps {
 // Constants
 // ======================================
 const LOCK_COLOR = '#3478F6';
-const LOCK_RING_SIZE = 180;
+const LOCK_RING_SIZE = 130;
 
 const FEATURE_ITEMS = [
   { key: 'passcodes', label: 'Passcodes', icon: 'dialpad' },
   { key: 'cards', label: 'Cards', icon: 'card-account-details-outline' },
-  { key: 'fingerprints', label: 'Fingerprints', icon: 'fingerprint' },
+  { key: 'fingerprints', label: 'Fingerprint', icon: 'fingerprint' },
   { key: 'records', label: 'Records', icon: 'history' },
 ] as const;
 
@@ -128,7 +127,6 @@ function LockCard({
   isOnline,
   isLoading,
   lockState,
-  batteryLevel,
   onAction,
   onRename,
   onFetchLogs,
@@ -139,10 +137,8 @@ function LockCard({
 }: LockCardProps) {
   // Demo state
   const [demoLockState, setDemoLockState] = useState<LockState>('locked');
-  const [demoBattery, setDemoBattery] = useState(100);
 
   const effectiveLockState = isDemo ? demoLockState : (lockState ?? 'locked');
-  const effectiveBattery = isDemo ? demoBattery : (batteryLevel ?? null);
   const isLocked = effectiveLockState === 'locked';
 
   // Modal state
@@ -939,19 +935,15 @@ function LockCard({
 
       {isOnline ? (
         <>
-          {/* Header with name and battery */}
+          {/* Header - matching AC card layout */}
           <View style={styles.header}>
+            <MaterialCommunityIcons
+              name="lock"
+              size={22}
+              color={LOCK_COLOR}
+              style={styles.headerIcon}
+            />
             <Text style={styles.headerName} numberOfLines={1}>{name}</Text>
-            {effectiveBattery !== null && (
-              <View style={styles.batteryRow}>
-                <MaterialCommunityIcons
-                  name={effectiveBattery > 80 ? 'battery' : effectiveBattery > 40 ? 'battery-50' : 'battery-20'}
-                  size={18}
-                  color={effectiveBattery > 20 ? '#22C55E' : '#EF4444'}
-                />
-                <Text style={styles.batteryText}>{effectiveBattery}%</Text>
-              </View>
-            )}
           </View>
 
           {/* Lock Circle */}
@@ -967,7 +959,7 @@ function LockCard({
                 <View style={[styles.lockCircle, { backgroundColor: isLocked ? `${LOCK_COLOR}15` : '#22C55E15' }]}>
                   <MaterialCommunityIcons
                     name={isLocked ? 'lock' : 'lock-open-variant'}
-                    size={48}
+                    size={34}
                     color={isLocked ? LOCK_COLOR : '#22C55E'}
                   />
                 </View>
@@ -1000,7 +992,7 @@ function LockCard({
               >
                 <MaterialCommunityIcons
                   name={item.icon as any}
-                  size={26}
+                  size={22}
                   color={LOCK_COLOR}
                 />
                 <Text style={styles.featureLabel}>{item.label}</Text>
@@ -1063,7 +1055,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: 1,
     borderColor: '#E8E8E8',
-    padding: 16,
+    padding: 12,
     marginBottom: 16,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
@@ -1118,31 +1110,25 @@ const styles = StyleSheet.create({
   },
   // Header
   header: {
+    flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 10,
-    marginBottom: 8,
+    marginBottom: 4,
+    marginTop: 6,
     paddingHorizontal: 30,
+  },
+  headerIcon: {
+    marginRight: 10,
   },
   headerName: {
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: '700',
     color: '#333',
-    marginBottom: 2,
-  },
-  batteryRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  batteryText: {
-    fontSize: 12,
-    color: '#6B7280',
-    fontWeight: '500',
+    flex: 1,
   },
   // Lock
   lockContainer: {
     alignItems: 'center',
-    marginVertical: 12,
+    marginVertical: 2,
   },
   lockRingOuter: {
     width: LOCK_RING_SIZE,
@@ -1151,24 +1137,24 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   lockRingInner: {
-    width: LOCK_RING_SIZE - 20,
-    height: LOCK_RING_SIZE - 20,
-    borderRadius: (LOCK_RING_SIZE - 20) / 2,
-    borderWidth: 4,
+    width: LOCK_RING_SIZE - 16,
+    height: LOCK_RING_SIZE - 16,
+    borderRadius: (LOCK_RING_SIZE - 16) / 2,
+    borderWidth: 3,
     alignItems: 'center',
     justifyContent: 'center',
   },
   lockCircle: {
-    width: LOCK_RING_SIZE - 50,
-    height: LOCK_RING_SIZE - 50,
-    borderRadius: (LOCK_RING_SIZE - 50) / 2,
+    width: LOCK_RING_SIZE - 40,
+    height: LOCK_RING_SIZE - 40,
+    borderRadius: (LOCK_RING_SIZE - 40) / 2,
     alignItems: 'center',
     justifyContent: 'center',
   },
   lockHint: {
-    fontSize: 12,
+    fontSize: 11,
     color: '#9CA3AF',
-    marginTop: 8,
+    marginTop: 4,
     fontWeight: '500',
   },
   // Divider
@@ -1176,21 +1162,26 @@ const styles = StyleSheet.create({
     height: 1,
     backgroundColor: '#E5E7EB',
     marginHorizontal: 8,
-    marginVertical: 12,
+    marginVertical: 6,
   },
-  // Feature Grid
+  // Feature Grid - matching AC mode bar
   featureGrid: {
     flexDirection: 'row',
+    backgroundColor: '#F3F4F6',
+    borderRadius: 12,
+    padding: 6,
     justifyContent: 'space-around',
-    paddingHorizontal: 8,
   },
   featureItem: {
     alignItems: 'center',
-    gap: 6,
-    width: 70,
+    gap: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 4,
+    borderRadius: 10,
+    width: 65,
   },
   featureLabel: {
-    fontSize: 11,
+    fontSize: 10,
     color: '#333',
     fontWeight: '500',
     textAlign: 'center',

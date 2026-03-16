@@ -177,21 +177,27 @@ exports.assignDevice = async (req, res) => {
       return res.status(400).json({ message: 'Serial number is required' });
     }
 
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid room ID' });
+    }
+
     const room = await Room.findOne({ _id: id, owner: req.user.id });
     if (!room) {
       return res.status(404).json({ message: 'Room not found' });
     }
 
-    const device = await Device.findOne({
-      serialNumber: serialNumber.trim().toUpperCase(),
-      owner: req.user.id,
-    });
+    const cleanSerial = serialNumber.trim().toUpperCase();
+
+    // Use findOneAndUpdate to avoid issues with select:false fields (mqttToken, mqttUsername, mqttPassword)
+    const device = await Device.findOneAndUpdate(
+      { serialNumber: cleanSerial, owner: req.user.id },
+      { room: room._id },
+      { new: true, select: 'name serialNumber deviceType room' }
+    );
+
     if (!device) {
       return res.status(404).json({ message: 'Device not found or not owned by you' });
     }
-
-    device.room = room._id;
-    await device.save();
 
     res.json({
       message: `Device "${device.name}" assigned to "${room.name}"`,
@@ -202,7 +208,7 @@ exports.assignDevice = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Assign device error:', error.message);
+    console.error('Assign device error:', error.message, error.stack);
     res.status(500).json({ message: 'Failed to assign device to room' });
   }
 };
@@ -214,28 +220,32 @@ exports.removeDevice = async (req, res) => {
   try {
     const { id, serialNumber } = req.params;
 
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid room ID' });
+    }
+
     const room = await Room.findOne({ _id: id, owner: req.user.id });
     if (!room) {
       return res.status(404).json({ message: 'Room not found' });
     }
 
-    const device = await Device.findOne({
-      serialNumber: serialNumber.trim().toUpperCase(),
-      owner: req.user.id,
-      room: room._id,
-    });
+    const cleanSerial = serialNumber.trim().toUpperCase();
+
+    const device = await Device.findOneAndUpdate(
+      { serialNumber: cleanSerial, owner: req.user.id, room: room._id },
+      { room: null },
+      { new: true, select: 'name serialNumber deviceType room' }
+    );
+
     if (!device) {
       return res.status(404).json({ message: 'Device not found in this room' });
     }
-
-    device.room = null;
-    await device.save();
 
     res.json({
       message: `Device "${device.name}" removed from "${room.name}"`,
     });
   } catch (error) {
-    console.error('Remove device from room error:', error.message);
+    console.error('Remove device from room error:', error.message, error.stack);
     res.status(500).json({ message: 'Failed to remove device from room' });
   }
 };
