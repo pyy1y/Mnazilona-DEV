@@ -173,8 +173,8 @@ exports.assignDevice = async (req, res) => {
     const { id } = req.params;
     const { serialNumber } = req.body;
 
-    if (!serialNumber) {
-      return res.status(400).json({ message: 'Serial number is required' });
+    if (!serialNumber || typeof serialNumber !== 'string') {
+      return res.status(400).json({ message: 'Serial number is required and must be a string' });
     }
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -190,8 +190,8 @@ exports.assignDevice = async (req, res) => {
 
     // Use findOneAndUpdate to avoid issues with select:false fields (mqttToken, mqttUsername, mqttPassword)
     const device = await Device.findOneAndUpdate(
-      { serialNumber: cleanSerial, owner: req.user.id },
-      { room: room._id },
+      { serialNumber: cleanSerial, owner: new mongoose.Types.ObjectId(req.user.id) },
+      { $set: { room: room._id } },
       { new: true, select: 'name serialNumber deviceType room' }
     );
 
@@ -209,7 +209,7 @@ exports.assignDevice = async (req, res) => {
     });
   } catch (error) {
     console.error('Assign device error:', error.message, error.stack);
-    res.status(500).json({ message: 'Failed to assign device to room' });
+    res.status(500).json({ message: 'Failed to assign device to room', error: error.message });
   }
 };
 
