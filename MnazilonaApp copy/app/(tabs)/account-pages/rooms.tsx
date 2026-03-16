@@ -256,7 +256,8 @@ export default function RoomsScreen() {
           { requireAuth: true }
         );
         if (!response.success) {
-          Alert.alert('Error', response.message || 'Failed to assign device.');
+          const debugInfo = response.data?.debug ? `\n\nDebug: ${response.data.debug}` : '';
+          Alert.alert('Error', (response.message || 'Failed to assign device.') + debugInfo);
           return;
         }
         closeAssignModal();
