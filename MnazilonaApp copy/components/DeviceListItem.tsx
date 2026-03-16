@@ -8,6 +8,7 @@ import LightCard from './LightCard';
 import DimmerCard from './DimmerCard';
 import WaterTankCard from './WaterTankCard';
 import ACCard from './ACCard';
+import SecurityCard from './SecurityCard';
 
 // ======================================
 // Types
@@ -75,6 +76,10 @@ const isACDevice = (device: Device): boolean => {
   return device.deviceType === 'ac';
 };
 
+const isSecurityDevice = (device: Device): boolean => {
+  return device.deviceType === 'security';
+};
+
 const getDeviceDisplayName = (device: Device): string => {
   if (device.name && device.name.trim()) {
     return device.name.trim();
@@ -113,6 +118,7 @@ function DeviceListItem({
   const isDimmer = useMemo(() => isDimmerDevice(device), [device]);
   const isWaterTank = useMemo(() => isWaterTankDevice(device), [device]);
   const isAC = useMemo(() => isACDevice(device), [device]);
+  const isSecurity = useMemo(() => isSecurityDevice(device), [device]);
 
   const isLoading = useMemo(() => {
     if (!actionLoading) return false;
@@ -129,7 +135,23 @@ function DeviceListItem({
   // Determine which card to render
   let card: React.ReactNode = null;
 
-  if (isDimmer) {
+  if (isSecurity) {
+    card = (
+      <SecurityCard
+        name={displayName}
+        serialNumber={device.serialNumber}
+        macAddress={device.macAddress}
+        isOnline={device.isOnline}
+        isLoading={isLoading}
+        securityMode={(device.state?.securityMode as any) || null}
+        onAction={(_serial, cmd) => onSendCommand(device.serialNumber, { action: cmd.action as any })}
+        onRename={onRenameDevice}
+        onFetchLogs={onFetchLogs}
+        brandColor={brandColor}
+        isDemo={true}
+      />
+    );
+  } else if (isDimmer) {
     card = (
       <DimmerCard
         name={displayName}
