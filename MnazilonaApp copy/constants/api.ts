@@ -2,8 +2,9 @@
 // ======================================
 // API Configuration
 // ======================================
-const DEV_API_URL = 'http://91.98.207.169';
-//const PROD_API_URL = 'https://api.manazel.app';
+const DEV_API_URL = process.env.EXPO_PUBLIC_DEV_API_URL || 'http://91.98.207.169';
+const PROD_API_URL = process.env.EXPO_PUBLIC_PROD_API_URL || 'http://91.98.207.169';
+// TODO: عند تجهيز الدومين والـ SSL، غيّر PROD_API_URL إلى https://api.manazel.app
 const isDev = __DEV__;
 
 export const API_URL = isDev ? DEV_API_URL : PROD_API_URL;

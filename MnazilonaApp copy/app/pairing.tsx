@@ -29,8 +29,8 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 
 const BRAND = "#2E5B8E";
 const ESP_IP = "http://192.168.4.1";
-const AP_PASSWORD = "manazel123";
-const AP_SSID = "Mnazilona_Setup";
+const AP_PASSWORD = process.env.EXPO_PUBLIC_AP_PASSWORD || "manazel123";
+const AP_SSID = process.env.EXPO_PUBLIC_AP_SSID || "Mnazilona_Setup";
 
 // ═══════════════════════════════════════
 // Types

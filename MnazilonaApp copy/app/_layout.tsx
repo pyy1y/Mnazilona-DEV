@@ -3,7 +3,10 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { View, ActivityIndicator, StyleSheet } from 'react-native';
 import { Slot, useRouter, useSegments, useGlobalSearchParams } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { checkAuthState } from '../utils/auth';
+
+const ONBOARDING_KEY = 'onboarding_seen';
 
 const BRAND_COLOR = '#2E5B8E';
 
@@ -13,7 +16,8 @@ const PUBLIC_ROUTES = [
   'register',
   'forgot-password',
   'reset-password',
-  'change-password',  // ✅ مهم جداً!
+  'change-password',
+  'onboarding',
 ] as const;
 
 // الصفحات المحمية خارج tabs
@@ -34,9 +38,24 @@ export default function RootLayout() {
 
   const checkAuth = useCallback(async () => {
     try {
+      const currentSegment = segments[0] as string | undefined;
+
+      // تحقق إذا المستخدم شاف الـ onboarding أو لا (نقرأ من AsyncStorage كل مرة)
+      const onboardingSeen = await AsyncStorage.getItem(ONBOARDING_KEY);
+
+      // إذا ما شاف الـ onboarding وهو مو فيها حالياً -> وجهه للـ onboarding
+      if (!onboardingSeen && currentSegment !== 'onboarding') {
+        router.replace('/onboarding' as any);
+        return;
+      }
+
+      // إذا هو في صفحة الـ onboarding خله فيها بدون تحقق auth
+      if (currentSegment === 'onboarding') {
+        return;
+      }
+
       const { isAuthenticated } = await checkAuthState();
 
-      const currentSegment = segments[0] as string | undefined;
       const inTabs = currentSegment === '(tabs)';
 
       // OTP خاصة - تعتبر public إلا لو delete_account
@@ -52,14 +71,11 @@ export default function RootLayout() {
         isOtpProtected;
 
       if (!isAuthenticated && isProtectedRoute) {
-        // المستخدم مو مسجل ويحاول يدخل صفحة محمية
         router.replace('/login');
         return;
       }
 
       if (isAuthenticated && isPublicRoute) {
-        // المستخدم مسجل ويحاول يدخل صفحة عامة (login/register)
-        // ✅ لكن نستثني change-password لأنه يمكن يغير باسورده وهو مسجل
         if (currentSegment !== 'change-password') {
           router.replace('/(tabs)');
           return;
