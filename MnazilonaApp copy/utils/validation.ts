@@ -24,9 +24,9 @@ export function isStrongPassword(password: string): boolean {
   return VALIDATION.PASSWORD_REGEX.test(password);
 }
 
-export function getPasswordStrengthErrors(password: string): string[] {
+export function getPasswordStrengthErrors(password: string, username?: string): string[] {
   const errors: string[] = [];
-  
+
   if (!password) {
     errors.push('Password is required');
     return errors;
@@ -42,6 +42,17 @@ export function getPasswordStrengthErrors(password: string): string[] {
 
   if (!/\d/.test(password)) {
     errors.push('Password must contain at least 1 number');
+  }
+
+  if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?]/.test(password)) {
+    errors.push('Password must contain at least 1 special character');
+  }
+
+  if (username) {
+    const prefix = username.toLowerCase().slice(0, 5);
+    if (prefix.length >= 1 && password.toLowerCase().includes(prefix)) {
+      errors.push('Password must not contain the first 5 characters of your name');
+    }
   }
 
   return errors;

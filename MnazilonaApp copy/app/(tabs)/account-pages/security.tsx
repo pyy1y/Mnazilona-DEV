@@ -19,6 +19,7 @@ import { api, isAuthError } from '../../../utils/api';
 import { useAuth } from '../../../hooks/useAuth';
 import { isStrongPassword } from '../../../utils/validation';
 import { ENDPOINTS, APP_CONFIG } from '../../../constants/api';
+import { getUser } from '../../../utils/userStorage';
 
 const BRAND_COLOR = '#2E5B8E';
 
@@ -91,9 +92,18 @@ export default function SecurityScreen() {
     if (!isStrongPassword(newPw)) {
       Alert.alert(
         'Weak Password',
-        'Password must be at least 8 characters with 1 uppercase letter and 1 number.'
+        'Password must be at least 8 characters with 1 uppercase letter, 1 number, and 1 special character.'
       );
       return;
+    }
+
+    const storedUser = await getUser();
+    if (storedUser?.name) {
+      const prefix = storedUser.name.toLowerCase().slice(0, 5);
+      if (prefix.length >= 1 && newPw.toLowerCase().includes(prefix)) {
+        Alert.alert('Weak Password', 'Password must not contain the first 5 characters of your name.');
+        return;
+      }
     }
 
     if (oldPw === newPw) {
@@ -456,7 +466,7 @@ export default function SecurityScreen() {
               </View>
 
               <Text style={styles.helperText}>
-                Password must be at least 8 characters with 1 uppercase letter and 1 number.
+                Password must be at least 8 characters with 1 uppercase letter, 1 number, and 1 special character.
               </Text>
 
               <View style={styles.modalActions}>

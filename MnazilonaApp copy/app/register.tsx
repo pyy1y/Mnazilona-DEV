@@ -200,8 +200,14 @@ export default function RegisterScreen() {
     if (!isStrongPassword(password)) {
       Alert.alert(
         'Weak Password',
-        'Password must be at least 8 characters with 1 uppercase letter and 1 number.'
+        'Password must be at least 8 characters with 1 uppercase letter, 1 number, and 1 special character.'
       );
+      return null;
+    }
+
+    const namePrefix = trimmedName.toLowerCase().slice(0, 5);
+    if (namePrefix.length >= 1 && password.toLowerCase().includes(namePrefix)) {
+      Alert.alert('Weak Password', 'Password must not contain the first 5 characters of your name.');
       return null;
     }
 
@@ -482,7 +488,7 @@ export default function RegisterScreen() {
 
         {/* Password Helper Text */}
         <Text style={styles.helperText}>
-          Must contain at least 8 characters, 1 number, and 1 uppercase letter.
+          Must contain at least 8 characters, 1 uppercase letter, 1 number, and 1 special character.
         </Text>
 
         {/* Date of Birth */}

@@ -12,7 +12,14 @@ const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email |
 // Password
 const strongPassword = (password) => {
   if (!password || typeof password !== 'string') return false;
-  return /^(?=.*[A-Z])(?=.*\d).{8,}$/.test(password);
+  return /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?]).{8,}$/.test(password);
+};
+
+const passwordMatchesUsername = (password, username) => {
+  if (!password || !username) return false;
+  const prefix = username.toLowerCase().slice(0, 5);
+  if (prefix.length < 1) return false;
+  return password.toLowerCase().includes(prefix);
 };
 
 // String
@@ -78,7 +85,7 @@ const timeAgo = (date) => {
 
 module.exports = {
   normalizeEmail, maskEmail, isValidEmail,
-  strongPassword, sanitizeString, truncate,
+  strongPassword, passwordMatchesUsername, sanitizeString, truncate,
   isEmpty, isValidObjectId, formatDate, timeAgo,
   generateToken, sanitizeUserResponse,
 };

@@ -86,7 +86,7 @@ export const APP_CONFIG = {
 // ======================================
 export const VALIDATION = {
   PASSWORD_MIN_LENGTH: 8,
-  PASSWORD_REGEX: /^(?=.*[A-Z])(?=.*\d).{8,}$/,
+  PASSWORD_REGEX: /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?]).{8,}$/,
   EMAIL_REGEX: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
   NAME_MIN_LENGTH: 2,
   NAME_MAX_LENGTH: 100,

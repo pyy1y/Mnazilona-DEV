@@ -91,7 +91,7 @@ export default function ChangePasswordScreen() {
     if (!isStrongPassword(newPassword)) {
       Alert.alert(
         'Weak Password',
-        'Password must be at least 8 characters with 1 uppercase letter and 1 number.'
+        'Password must be at least 8 characters with 1 uppercase letter, 1 number, and 1 special character.'
       );
       return;
     }
@@ -168,7 +168,7 @@ export default function ChangePasswordScreen() {
         {/* Header */}
         <Text style={styles.title}>Set New Password</Text>
         <Text style={styles.subtitle}>
-          Create a strong password with at least 8 characters, including 1 uppercase letter and 1 number.
+          Create a strong password with at least 8 characters, including 1 uppercase letter, 1 number, and 1 special character.
         </Text>
 
         {/* New Password Input */}

@@ -4,8 +4,8 @@
   "description": "Manazel IoT Backend Server",
   "main": "index.js",
   "scripts": {
-    "start": "NODE_ENV=production node index.js",
-    "dev": "NODE_ENV=development node index.js"
+    "start": "set NODE_ENV=production && node index.js",
+    "dev": "set NODE_ENV=development && node index.js"
   },
   "keywords": [
     "iot",

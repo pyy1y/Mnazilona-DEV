@@ -1,7 +1,7 @@
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { sendVerificationCode, verifyCode } = require('../services/codeService');
-const { normalizeEmail, strongPassword, sanitizeString, generateToken, sanitizeUserResponse } = require('../utils/helpers');
+const { normalizeEmail, strongPassword, passwordMatchesUsername, sanitizeString, generateToken, sanitizeUserResponse } = require('../utils/helpers');
 
 const BCRYPT_ROUNDS = 12;
 
@@ -37,7 +37,13 @@ exports.registerVerifyCode = async (req, res) => {
 
     if (!strongPassword(password)) {
       return res.status(400).json({
-        message: 'Password must be at least 8 characters with 1 uppercase letter and 1 number',
+        message: 'Password must be at least 8 characters with 1 uppercase letter, 1 number, and 1 special character',
+      });
+    }
+
+    if (passwordMatchesUsername(password, name)) {
+      return res.status(400).json({
+        message: 'Password must not contain the first 5 characters of your name',
       });
     }
 
@@ -142,7 +148,14 @@ exports.resetPassword = async (req, res) => {
 
     if (!strongPassword(newPassword)) {
       return res.status(400).json({
-        message: 'Password must be at least 8 characters with 1 uppercase letter and 1 number',
+        message: 'Password must be at least 8 characters with 1 uppercase letter, 1 number, and 1 special character',
+      });
+    }
+
+    const userForReset = await User.findOne({ email }).lean();
+    if (userForReset && passwordMatchesUsername(newPassword, userForReset.name)) {
+      return res.status(400).json({
+        message: 'Password must not contain the first 5 characters of your name',
       });
     }
 
@@ -172,12 +185,18 @@ exports.changePassword = async (req, res) => {
 
     if (!strongPassword(newPassword)) {
       return res.status(400).json({
-        message: 'Password must be at least 8 characters with 1 uppercase letter and 1 number',
+        message: 'Password must be at least 8 characters with 1 uppercase letter, 1 number, and 1 special character',
       });
     }
 
-    const user = await User.findById(userId).select('+password');
+    const user = await User.findById(userId).select('+password +name');
     if (!user) return res.status(404).json({ message: 'User not found' });
+
+    if (passwordMatchesUsername(newPassword, user.name)) {
+      return res.status(400).json({
+        message: 'Password must not contain the first 5 characters of your name',
+      });
+    }
 
     const isPasswordValid = await bcrypt.compare(oldPassword, user.password);
     if (!isPasswordValid) return res.status(401).json({ message: 'Current password is incorrect' });
