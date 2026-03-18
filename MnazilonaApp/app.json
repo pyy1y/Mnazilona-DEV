@@ -18,11 +18,13 @@
         "NSLocalNetworkUsageDescription": "Required to communicate with Manazel devices on your local network during setup.",
         "NSLocationWhenInUseUsageDescription": "Required to detect the WiFi network during device setup.",
         "NSBonjourServices": [
+          "_http._tcp",
           "_http._tcp"
         ],
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true
-        }
+        },
+        "ITSAppUsesNonExemptEncryption": false
       },
       "entitlements": {
         "com.apple.developer.networking.HotspotConfiguration": true,
@@ -48,8 +50,7 @@
         "android.permission.CHANGE_WIFI_STATE",
         "android.permission.CHANGE_NETWORK_STATE"
       ],
-      "package": "com.mnazilona.MnazilonaApp",
-      "usesCleartextTraffic": true
+      "package": "com.mnazilona.MnazilonaApp"
     },
     "web": {
       "output": "static",
@@ -75,6 +76,13 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "055b3ee0-09e6-48db-ae97-c80bc0df293f"
+      }
+    },
+    "owner": "pyy1y"
   }
 }

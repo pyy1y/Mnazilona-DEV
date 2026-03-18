@@ -13,27 +13,27 @@ const getExpirationDate = () => new Date(Date.now() + CODE_EXPIRY_MINUTES * 60 *
 
 const EMAIL_TEMPLATES = {
   register: {
-    subject: 'Welcome to Manazel - Verify Your Email',
-    getText: (code, minutes) => `Welcome to Manazel!\n\nYour verification code is: ${code}\n\nExpires in ${minutes} minutes.`,
+    subject: 'Welcome to Mnazilona - Verify Your Email',
+    getText: (code, minutes) => `Welcome to Mnazilona!\n\nYour verification code is: ${code}\n\nExpires in ${minutes} minutes.`,
   },
   login: {
-    subject: 'Manazel - Login Verification Code',
+    subject: 'Mnazilona - Login Verification Code',
     getText: (code, minutes) => `Your login code is: ${code}\n\nExpires in ${minutes} minutes.`,
   },
   reset_password: {
-    subject: 'Manazel - Password Reset Code',
+    subject: 'Mnazilona - Password Reset Code',
     getText: (code, minutes) => `Your password reset code is: ${code}\n\nExpires in ${minutes} minutes.`,
   },
   delete_account: {
-    subject: 'Manazel - Account Deletion Confirmation',
+    subject: 'Mnazilona - Account Deletion Confirmation',
     getText: (code, minutes) => `Your account deletion code is: ${code}\n\nExpires in ${minutes} minutes.\n\nWARNING: This action is irreversible.`,
   },
   change_email_old: {
-    subject: 'Manazel - Email Change Verification',
+    subject: 'Mnazilona - Email Change Verification',
     getText: (code, minutes) => `Someone requested to change your email address.\n\nYour verification code is: ${code}\n\nExpires in ${minutes} minutes.\n\nIf you did not request this, please ignore this email.`,
   },
   change_email_new: {
-    subject: 'Manazel - Verify Your New Email',
+    subject: 'Mnazilona - Verify Your New Email',
     getText: (code, minutes) => `Your verification code for the new email is: ${code}\n\nExpires in ${minutes} minutes.`,
   },
 };

@@ -1,6 +1,6 @@
 const nodemailer = require('nodemailer');
 
-const APP_NAME = process.env.APP_NAME || 'Manazel';
+const APP_NAME = process.env.APP_NAME || 'Mnazilona';
 const FROM_EMAIL = process.env.EMAIL_FROM || process.env.EMAIL_USER;
 
 let transporter = null;

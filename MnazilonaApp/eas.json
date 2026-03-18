@@ -17,15 +17,26 @@
         "simulator": false
       }
     },
+    "testflight": {
+      "distribution": "store",
+      "autoIncrement": true
+    },
     "production": {
       "autoIncrement": true
     }
   },
   "submit": {
+    "testflight": {
+      "ios": {
+        "appleId": "abuser6278@gmail.com",
+        "ascAppId": "6760734635",
+        "appleTeamId": "FJ7HF62V89"
+      }
+    },
     "production": {
       "ios": {
         "appleId": "abuser6278@gmail.com",
-        "ascAppId": "FILL_AFTER_CREATING_APP_IN_APP_STORE_CONNECT",
+        "ascAppId": "6760734635",
         "appleTeamId": "FJ7HF62V89"
       }
     }
