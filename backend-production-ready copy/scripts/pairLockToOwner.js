@@ -8,7 +8,7 @@ const User = require('../models/User');
 const Device = require('../models/Device');
 const AllowedDevice = require('../models/AllowedDevice');
 
-const OWNER_EMAIL = 'abuser6278@gmail.com';
+const OWNER_EMAIL = 'aaa654@windowslive.com';
 const LOCK_SERIAL = 'LOCK-001';
 
 async function pair() {
