@@ -121,7 +121,16 @@ exports.inquiry = async (req, res) => {
       source: 'server',
     });
 
-    const isOwned = !!(device.owner);
+    // ownershipStatus: "none" = no owner, "self" = same owner, "other" = different owner
+    let ownershipStatus = 'none';
+    if (device.owner) {
+      const { userId } = req.body;
+      if (userId && device.owner.toString() === userId.toString()) {
+        ownershipStatus = 'self';
+      } else {
+        ownershipStatus = 'other';
+      }
+    }
 
     res.json({
       brokerHost: broker.host,
@@ -131,7 +140,8 @@ exports.inquiry = async (req, res) => {
       mqttPassword: allowedDevice.mqttPassword,
       mqttToken: device.mqttToken,
       topics: getDeviceACL(cleanSerial),
-      isOwned,
+      isOwned: ownershipStatus !== 'none',
+      ownershipStatus,
       message: 'Configuration retrieved successfully',
     });
   } catch (error) {
