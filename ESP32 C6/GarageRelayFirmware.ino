@@ -187,17 +187,24 @@ bool loadSettings() {
   mqttPass       = prefs.getString("mq_pass", "");
   mqttToken      = prefs.getString("mq_token", "");
   mqttPort       = prefs.getInt("mq_port", 1883);
+  pairingUserId  = prefs.getString("userId", "");
   prefs.end();
   return (storedSSID.length() > 0 && mqttHost.length() > 0);
 }
 
-void saveWifiSettings(const String& ssid, const String& psw) {
+void saveWifiSettings(const String& ssid, const String& psw, const String& userId = "") {
   prefs.begin("config", false);
   prefs.putString("ssid", ssid);
   prefs.putString("psw", psw);
+  if (userId.length() > 0) {
+    prefs.putString("userId", userId);
+  }
   prefs.end();
   storedSSID = ssid;
   storedPassword = psw;
+  if (userId.length() > 0) {
+    pairingUserId = userId;
+  }
 }
 
 void saveMqttSettings(const String& host, int port, const String& user, const String& pass, const String& token) {
@@ -226,6 +233,7 @@ void clearAllSettings() {
   mqttUser  = "";
   mqttPass  = "";
   mqttToken = "";
+  pairingUserId = "";
 }
 
 
@@ -708,7 +716,7 @@ void handleSetup() {
   }
 
   Serial.printf("[Setup] Trying WiFi: %s (AP+STA mode)\n", ssid.c_str());
-  saveWifiSettings(ssid, pass);
+  saveWifiSettings(ssid, pass, pairingUserId);
 
   // ──── جرب الاتصال بالواي فاي مع إبقاء الـ AP شغال (AP+STA) ────
   WiFi.mode(WIFI_AP_STA);

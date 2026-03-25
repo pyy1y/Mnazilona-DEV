@@ -25,6 +25,7 @@ import { useRouter } from "expo-router";
 import WifiManager from "react-native-wifi-reborn";
 import { API_URL, ENDPOINTS } from "../constants/api";
 import { TokenManager } from "../utils/api";
+import { getUserFromToken } from "../utils/auth";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 
 const BRAND = "#2E5B8E";
@@ -323,10 +324,22 @@ export default function PairingScreen() {
       // ✅ زيادة الـ timeout لأن الجهاز يجرب الواي فاي قبل ما يرد (AP+STA)
       const timeout = setTimeout(() => controller.abort(), 20000);
 
+      // ── أرسل userId عشان السيرفر يعرف إنه نفس المالك عند إعادة الربط ──
+      let userId = "";
+      try {
+        const token = await TokenManager.get();
+        if (token) {
+          const user = getUserFromToken(token);
+          if (user) userId = user.id;
+        }
+      } catch (e) {
+        if (__DEV__) console.warn("[Pairing] Could not extract userId:", e);
+      }
+
       const res = await fetch(`${ESP_IP}/setup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ssid, password }),
+        body: JSON.stringify({ ssid, password, userId }),
         signal: controller.signal,
       });
 
