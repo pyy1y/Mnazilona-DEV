@@ -11,7 +11,7 @@
     "ios": {
       "supportsTablet": true,
       "buildNumber": "1",
-      "bundleIdentifier": "com.anonymous.MnazilonaApp",
+      "bundleIdentifier": "com.mnazilona.MnazilonaApp",
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "Required to connect to Manazel devices for setup and control.",
         "NSBluetoothPeripheralUsageDescription": "Required to set up and pair with your Manazel device via BLE.",
@@ -22,17 +22,7 @@
           "_http._tcp"
         ],
         "NSAppTransportSecurity": {
-          "NSAllowsArbitraryLoads": false,
-          "NSExceptionDomains": {
-            "192.168.4.1": {
-              "NSExceptionAllowsInsecureHTTPLoads": true,
-              "NSIncludesSubdomains": false
-            },
-            "192.168.8.199": {
-              "NSExceptionAllowsInsecureHTTPLoads": true,
-              "NSIncludesSubdomains": false
-            }
-          }
+          "NSAllowsArbitraryLoads": true
         }
       },
       "entitlements": {
@@ -59,12 +49,8 @@
         "android.permission.CHANGE_WIFI_STATE",
         "android.permission.CHANGE_NETWORK_STATE"
       ],
-<<<<<<< Updated upstream
-      "package": "com.anonymous.MnazilonaApp"
-=======
       "package": "com.mnazilona.MnazilonaApp",
       "usesCleartextTraffic": true
->>>>>>> Stashed changes
     },
     "web": {
       "output": "static",
