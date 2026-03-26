@@ -18,6 +18,7 @@
         "NSLocalNetworkUsageDescription": "Required to communicate with Manazel devices on your local network during setup.",
         "NSLocationWhenInUseUsageDescription": "Required to detect the WiFi network during device setup.",
         "NSBonjourServices": [
+          "_manazel._tcp",
           "_http._tcp"
         ],
         "NSAppTransportSecurity": {

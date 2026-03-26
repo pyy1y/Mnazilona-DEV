@@ -79,6 +79,9 @@ export const APP_CONFIG = {
   OTP_RESEND_SECONDS: 60,
   DEVICE_POLL_INTERVAL: 5000,
   REQUEST_TIMEOUT: 30000,
+  // Local network communication
+  LOCAL_DEVICE_PORT: 8080,
+  LOCAL_COMMAND_TIMEOUT: 5000,
 } as const;
 
 // ======================================

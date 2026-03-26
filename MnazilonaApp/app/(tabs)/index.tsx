@@ -24,6 +24,9 @@ import { api, isAuthError } from '../../utils/api';
 import { useAuth } from '../../hooks/useAuth';
 import { ENDPOINTS, APP_CONFIG } from '../../constants/api';
 import DeviceListItem from '../../components/DeviceListItem';
+import { DeviceCache } from '../../utils/deviceCache';
+import { startLocalDiscovery, stopLocalDiscovery, onLocalStatusUpdate } from '../../utils/localDiscovery';
+import { smartSendCommand, smartFetchLogs } from '../../utils/connectionManager';
 
 const BRAND_COLOR = '#2E5B8E';
 
@@ -41,6 +44,11 @@ type Device = {
   pairedAt?: string;
   deviceType?: string;
   room?: string | null;
+  state?: {
+    doorState?: 'open' | 'closed';
+    relay?: string;
+    [key: string]: unknown;
+  };
 };
 
 type Room = {
@@ -84,6 +92,7 @@ const [weatherError, setWeatherError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [unreadNotifCount, setUnreadNotifCount] = useState(0);
+  const [localSerials, setLocalSerials] = useState<Set<string>>(new Set());
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const isLoadingRef = useRef(false);
@@ -210,6 +219,20 @@ const getWeatherIcon = (state?: WeatherState) => {
     return Array.isArray(list) ? list : [];
   }, []);
 
+  // Load cached devices on first mount (offline-first)
+  const loadCachedDevices = useCallback(async () => {
+    const cached = await DeviceCache.getDevices();
+    if (cached && cached.devices.length > 0) {
+      // Show cached devices immediately (mark all as potentially offline)
+      setDevices(cached.devices);
+      setLoading(false);
+    }
+    const cachedRooms = await DeviceCache.getRooms();
+    if (cachedRooms.length > 0) {
+      setRooms(cachedRooms);
+    }
+  }, []);
+
   const loadDevices = useCallback(
     async (options: { isRefresh?: boolean; silent?: boolean } = {}) => {
       const { isRefresh = false, silent = false } = options;
@@ -235,30 +258,29 @@ const getWeatherIcon = (state?: WeatherState) => {
             await handleAuthError(response.status);
             return;
           }
-
-          if (!silent) {
-            Alert.alert('Error', response.message || 'Could not load devices.');
-          }
+          // Cloud failed — don't show error, cached devices are already showing
           return;
         }
 
-        setDevices(normalizeDevices(response.data));
+        const freshDevices = normalizeDevices(response.data);
+        setDevices(freshDevices);
+
+        // Save to cache for offline use
+        DeviceCache.saveDevices(freshDevices);
 
         // Load rooms (silent, non-blocking)
         try {
           const roomsRes = await api.get<any>(ENDPOINTS.ROOMS.LIST, { requireAuth: true });
           if (roomsRes.success && roomsRes.data?.rooms) {
             setRooms(roomsRes.data.rooms);
+            DeviceCache.saveRooms(roomsRes.data.rooms);
           }
         } catch {
           // silent
         }
       } catch (error: any) {
         if (error?.name === 'AbortError') return;
-
-        if (!silent) {
-          Alert.alert('Error', 'Could not load devices. Please try again.');
-        }
+        // Cloud unreachable — cached devices already showing, fail silently
       } finally {
         isLoadingRef.current = false;
         if (!silent && !isRefresh) setLoading(false);
@@ -274,19 +296,16 @@ const getWeatherIcon = (state?: WeatherState) => {
       setActionLoading(actionKey);
 
       try {
-        const response = await api.post<any>(
-          ENDPOINTS.DEVICES.COMMAND(serialNumber),
-          { command, params },
-          { requireAuth: true }
-        );
+        // Local-first: tries local network, falls back to cloud
+        const result = await smartSendCommand(serialNumber, command, params);
 
-        if (!response.success) {
-          if (isAuthError(response.status)) {
-            await handleAuthError(response.status);
+        if (!result.success) {
+          if (isAuthError(result.status)) {
+            await handleAuthError(result.status);
             return;
           }
 
-          Alert.alert('Error', response.message || 'Failed to send command.');
+          Alert.alert('Error', result.message || 'Failed to send command.');
           return;
         }
 
@@ -339,52 +358,65 @@ const getWeatherIcon = (state?: WeatherState) => {
 
   const fetchDeviceLogs = useCallback(
     async (serialNumber: string) => {
-      try {
-        const response = await api.get<any>(
-          ENDPOINTS.DEVICES.LOGS(serialNumber),
-          { requireAuth: true }
-        );
-
-        if (!response.success || !response.data?.logs) {
-          return [];
-        }
-
-        return response.data.logs.map((log: any) => ({
-          timestamp: new Date(log.timestamp).toLocaleString('en-US', {
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false,
-          }),
-          message: log.message,
-          type: log.type || 'info',
-        }));
-      } catch {
-        return [];
-      }
+      // Local-first: tries local logs from ESP32, falls back to cloud
+      const result = await smartFetchLogs(serialNumber);
+      return result.logs;
     },
     []
   );
 
   useFocusEffect(
     useCallback(() => {
-      loadDevices();
+      // 1. Show cached devices immediately, then fetch from cloud
+      loadCachedDevices().then(() => {
+        // 4. Fetch fresh data from cloud (after cache is loaded)
+        loadDevices();
+      });
 
+      // 2. Start local network discovery (mDNS)
+      startLocalDiscovery();
+
+      // 3. Listen for local status updates and merge into device state
+      const unsubscribe = onLocalStatusUpdate((serialNumber, status) => {
+        // Track which devices are local (React state)
+        setLocalSerials((prev) => {
+          if (prev.has(serialNumber)) return prev;
+          const next = new Set(prev);
+          next.add(serialNumber);
+          return next;
+        });
+
+        setDevices((prev) =>
+          prev.map((d) => {
+            if (d.serialNumber !== serialNumber) return d;
+            return {
+              ...d,
+              isOnline: true, // reachable locally = online
+              state: {
+                ...d.state,
+                doorState: status.doorState as 'open' | 'closed',
+                relay: status.relay,
+              },
+            };
+          })
+        );
+      });
+
+      // 4. Poll for updates (cloud)
       pollIntervalRef.current = setInterval(() => {
         loadDevices({ silent: true });
       }, APP_CONFIG.DEVICE_POLL_INTERVAL);
 
       return () => {
+        unsubscribe();
         if (pollIntervalRef.current) {
           clearInterval(pollIntervalRef.current);
           pollIntervalRef.current = null;
         }
         abortControllerRef.current?.abort();
+        stopLocalDiscovery();
       };
-    }, [loadDevices])
+    }, [loadDevices, loadCachedDevices])
   );
 
   const handleRefresh = useCallback(() => {
@@ -462,9 +494,10 @@ const getWeatherIcon = (state?: WeatherState) => {
         onFetchLogs={fetchDeviceLogs}
         brandColor={BRAND_COLOR}
         roomName={item.room ? roomMap[item.room] : undefined}
+        isLocal={localSerials.has(item.serialNumber)}
       />
     ),
-    [actionLoading, handleSendCommand, handleRenameDevice, fetchDeviceLogs, roomMap]
+    [actionLoading, handleSendCommand, handleRenameDevice, fetchDeviceLogs, roomMap, localSerials]
   );
 
   const renderEmpty = useCallback(
@@ -490,6 +523,10 @@ const getWeatherIcon = (state?: WeatherState) => {
   const onlineCount = useMemo(() => {
     return devices.filter(d => d.isOnline).length;
   }, [devices]);
+
+  const localCount = useMemo(() => {
+    return devices.filter(d => localSerials.has(d.serialNumber)).length;
+  }, [devices, localSerials]);
 
 
   return (
@@ -578,7 +615,7 @@ const getWeatherIcon = (state?: WeatherState) => {
 <View style={styles.card}>
   <View style={styles.cardTopRow}>
     <Text style={styles.cardTitle}>Status</Text>
-    <Text style={styles.cardMeta}>Live</Text>
+    <Text style={styles.cardMeta}>{localCount > 0 ? 'Local' : 'Cloud'}</Text>
   </View>
 
   <Text style={styles.statusMain}>
@@ -586,7 +623,7 @@ const getWeatherIcon = (state?: WeatherState) => {
   </Text>
 
   <Text style={styles.cardSubText}>
-    Total: {devices.length} • Offline: {devices.length - onlineCount}
+    Total: {devices.length} • Local: {localCount} • Offline: {devices.length - onlineCount}
   </Text>
 </View>
 </View>
