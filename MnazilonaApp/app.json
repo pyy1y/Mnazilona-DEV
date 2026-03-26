@@ -59,7 +59,12 @@
         "android.permission.CHANGE_WIFI_STATE",
         "android.permission.CHANGE_NETWORK_STATE"
       ],
+<<<<<<< Updated upstream
       "package": "com.anonymous.MnazilonaApp"
+=======
+      "package": "com.mnazilona.MnazilonaApp",
+      "usesCleartextTraffic": true
+>>>>>>> Stashed changes
     },
     "web": {
       "output": "static",
