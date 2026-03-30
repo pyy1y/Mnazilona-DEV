@@ -189,14 +189,8 @@ exports.changePassword = async (req, res) => {
       });
     }
 
-    const user = await User.findById(userId).select('+password +name');
+    const user = await User.findById(userId).select('+password +name +passwordChangedAt');
     if (!user) return res.status(404).json({ message: 'User not found' });
-
-    if (passwordMatchesUsername(newPassword, user.name)) {
-      return res.status(400).json({
-        message: 'Password must not contain the first 5 characters of your name',
-      });
-    }
 
     if (user.passwordChangedAt) {
       const hoursSinceLastChange = (Date.now() - new Date(user.passwordChangedAt).getTime()) / (1000 * 60 * 60);
@@ -204,6 +198,12 @@ exports.changePassword = async (req, res) => {
         const hoursLeft = Math.ceil(24 - hoursSinceLastChange);
         return res.status(429).json({ message: `You can only change your password once every 24 hours. Try again in ${hoursLeft} hour(s).` });
       }
+    }
+
+    if (passwordMatchesUsername(newPassword, user.name)) {
+      return res.status(400).json({
+        message: 'Password must not contain the first 5 characters of your name',
+      });
     }
 
     const isPasswordValid = await bcrypt.compare(oldPassword, user.password);
