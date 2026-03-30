@@ -198,6 +198,14 @@ exports.changePassword = async (req, res) => {
       });
     }
 
+    if (user.passwordChangedAt) {
+      const hoursSinceLastChange = (Date.now() - new Date(user.passwordChangedAt).getTime()) / (1000 * 60 * 60);
+      if (hoursSinceLastChange < 24) {
+        const hoursLeft = Math.ceil(24 - hoursSinceLastChange);
+        return res.status(429).json({ message: `You can only change your password once every 24 hours. Try again in ${hoursLeft} hour(s).` });
+      }
+    }
+
     const isPasswordValid = await bcrypt.compare(oldPassword, user.password);
     if (!isPasswordValid) return res.status(401).json({ message: 'Current password is incorrect' });
 
@@ -208,6 +216,7 @@ exports.changePassword = async (req, res) => {
 
     user.password = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     user.tokenVersion = (user.tokenVersion || 0) + 1;
+    user.passwordChangedAt = new Date();
     await user.save();
 
     const newToken = generateToken(user);

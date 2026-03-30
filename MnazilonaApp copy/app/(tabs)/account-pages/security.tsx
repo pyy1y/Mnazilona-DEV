@@ -125,6 +125,10 @@ export default function SecurityScreen() {
           await handleAuthError(response.status);
           return;
         }
+        if (response.status === 429) {
+          Alert.alert('Too Soon', response.message || 'You can only change your password once every 24 hours.');
+          return;
+        }
         Alert.alert('Error', response.message || 'Current password is incorrect.');
         return;
       }

@@ -29,6 +29,7 @@ const userSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true },
     lastLoginAt: { type: Date, default: null },
     tokenVersion: { type: Number, default: 0 },
+    passwordChangedAt: { type: Date, default: null },
   },
   {
     timestamps: true,
