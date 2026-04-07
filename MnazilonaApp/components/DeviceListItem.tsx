@@ -41,6 +41,7 @@ interface DeviceListItemProps {
   onFetchLogs?: (serialNumber: string) => Promise<LogEntry[]>;
   brandColor: string;
   roomName?: string;
+  isLocal?: boolean;
 }
 
 // ======================================
@@ -55,7 +56,7 @@ const isGarageDevice = (device: Device): boolean => {
     name.includes('garage') ||
     name.includes('كراج') ||
     name.includes('باب') ||
-    name.includes('manazel') ||
+    name.includes('mnazilona') ||
     name.includes('door') ||
     name.includes('gate')
   );
@@ -106,6 +107,22 @@ const RoomLabel = ({ name }: { name: string }) => (
 );
 
 // ======================================
+// Connection Mode Badge
+// ======================================
+const ConnectionBadge = ({ isLocal }: { isLocal: boolean }) => (
+  <View style={[styles.connectionBadge, isLocal ? styles.localBadge : styles.cloudBadge]}>
+    <MaterialCommunityIcons
+      name={isLocal ? 'wifi' : 'cloud-outline'}
+      size={10}
+      color={isLocal ? '#059669' : '#6B7280'}
+    />
+    <Text style={[styles.connectionBadgeText, isLocal ? styles.localBadgeText : styles.cloudBadgeText]}>
+      {isLocal ? 'Local' : 'Cloud'}
+    </Text>
+  </View>
+);
+
+// ======================================
 // Component
 // ======================================
 function DeviceListItem({
@@ -116,6 +133,7 @@ function DeviceListItem({
   onFetchLogs,
   brandColor,
   roomName,
+  isLocal = false,
 }: DeviceListItemProps) {
   const displayName = useMemo(() => getDeviceDisplayName(device), [device]);
   const isGarage = useMemo(() => isGarageDevice(device), [device]);
@@ -275,7 +293,10 @@ function DeviceListItem({
 
   return (
     <View>
-      {roomName ? <RoomLabel name={roomName} /> : null}
+      <View style={styles.metaRow}>
+        {roomName ? <RoomLabel name={roomName} /> : null}
+        {device.isOnline ? <ConnectionBadge isLocal={isLocal} /> : null}
+      </View>
       {card}
     </View>
   );
@@ -289,7 +310,8 @@ export default memo(DeviceListItem, (prevProps, nextProps) => {
     prevProps.device.state?.doorState === nextProps.device.state?.doorState &&
     prevProps.actionLoading === nextProps.actionLoading &&
     prevProps.brandColor === nextProps.brandColor &&
-    prevProps.roomName === nextProps.roomName
+    prevProps.roomName === nextProps.roomName &&
+    prevProps.isLocal === nextProps.isLocal
   );
 });
 
@@ -353,5 +375,36 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#AAA',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  metaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+    marginHorizontal: 4,
+  },
+  connectionBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    gap: 4,
+  },
+  localBadge: {
+    backgroundColor: '#D1FAE5',
+  },
+  cloudBadge: {
+    backgroundColor: '#F3F4F6',
+  },
+  connectionBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  localBadgeText: {
+    color: '#059669',
+  },
+  cloudBadgeText: {
+    color: '#6B7280',
   },
 });

@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════
- *  Manazel IoT - ESP32-C6 Firmware v1.0.0
+ *  Mnazilona IoT - ESP32-C6 Firmware v1.0.0
  *  SoftAP + HTTP Provisioning + Proof of Possession + DeviceSecret
  * ═══════════════════════════════════════════════════════════════
  *
@@ -21,6 +21,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <PubSubClient.h>
+#include <ESPmDNS.h>
 
 // ═══════════════════════════════════════
 // CONFIG - غيّر هالقيم لكل جهاز
@@ -32,14 +33,16 @@
 #define POP_CODE          "123456"
 
 // Production: use HTTPS
-// #define SERVER_URL     "https://api.manazel.app/devices/inquiry"
-#define SERVER_URL        "http://91.98.207.169/devices/inquiry"
+// Development: use HTTP with correct port
+#define SERVER_URL        "http://192.168.8.143:3000/devices/inquiry"
+// Production: uncomment and use your domain with HTTPS
+//#define SERVER_URL      "https://91.98.207.169/devices/inquiry"
 
 // ═══════════════════════════════════════
 // SoftAP Settings
 // ═══════════════════════════════════════
 #define AP_SSID           "Mnazilona_Setup"
-#define AP_PASSWORD       "manazel123"
+#define AP_PASSWORD       "mnazilona123"
 #define AP_CHANNEL        6
 #define AP_MAX_CLIENTS    1
 #define AP_IP             IPAddress(192, 168, 4, 1)
@@ -79,6 +82,32 @@
 #define MQTT_MAX_RECONNECTS   3
 
 // ═══════════════════════════════════════
+// Local Logs (Circular Buffer)
+// ═══════════════════════════════════════
+#define MAX_LOCAL_LOGS        50
+
+struct LocalLog {
+  uint32_t timestamp;   // millis()
+  char message[80];
+  char type[8];         // "info", "warning", "error"
+};
+
+LocalLog localLogs[MAX_LOCAL_LOGS];
+int logHead = 0;
+int logCount = 0;
+
+void addLog(const char* msg, const char* type = "info") {
+  LocalLog& entry = localLogs[logHead];
+  entry.timestamp = millis();
+  strncpy(entry.message, msg, sizeof(entry.message) - 1);
+  entry.message[sizeof(entry.message) - 1] = '\0';
+  strncpy(entry.type, type, sizeof(entry.type) - 1);
+  entry.type[sizeof(entry.type) - 1] = '\0';
+  logHead = (logHead + 1) % MAX_LOCAL_LOGS;
+  if (logCount < MAX_LOCAL_LOGS) logCount++;
+}
+
+// ═══════════════════════════════════════
 // State Machine
 // ═══════════════════════════════════════
 enum DeviceState {
@@ -104,6 +133,8 @@ uint32_t popLockoutUntil   = 0;
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 WebServer server(80);
+WebServer localServer(8080);  // Local API server (runs when online)
+bool localServerRunning = false;
 Preferences prefs;
 
 String storedSSID = "", storedPassword = "";
@@ -259,6 +290,10 @@ void handleDoorSensor() {
     const char* state = currentOpen ? "open" : "closed";
     Serial.printf("[Door] State: %s\n", state);
 
+    char logMsg[40];
+    snprintf(logMsg, sizeof(logMsg), "Door sensor: %s", state);
+    addLog(logMsg, currentOpen ? "warning" : "info");
+
     // أرسل حالة الباب عبر MQTT
     if (mqttClient.connected()) {
       StaticJsonDocument<128> doc;
@@ -280,6 +315,7 @@ void startRelayPulse() {
   // لو الريلاي شغال - تجاهل (حماية من الضغط المتكرر)
   if (relayOffTime > 0) {
     Serial.println("[Relay] Already pulsing - ignored");
+    addLog("Open command ignored - already pulsing", "warning");
     return;
   }
 
@@ -287,6 +323,7 @@ void startRelayPulse() {
   setLED_action();
   relayOffTime = millis() + RELAY_PULSE_MS;
   Serial.println("[Relay] OPEN (2s pulse)");
+  addLog("Relay OPENED (2s pulse)", "info");
 
   // أبلغ السيرفر إن الباب انفتح
   if (mqttClient.connected()) {
@@ -304,6 +341,7 @@ void handleRelay() {
     digitalWrite(RELAY_PIN, LOW);
     relayOffTime = 0;
     Serial.println("[Relay] CLOSED (auto)");
+    addLog("Relay CLOSED (auto)", "info");
     if (currentState == STATE_ONLINE) setLED_online();
 
     // أبلغ السيرفر إن الباب قفل
@@ -334,8 +372,13 @@ bool connectWiFi(const String& ssid, const String& psw, uint32_t timeoutMs = 120
   }
 
   bool ok = (WiFi.status() == WL_CONNECTED);
-  if (ok) Serial.printf("[WiFi] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
-  else    Serial.println("[WiFi] Connection failed");
+  if (ok) {
+    Serial.printf("[WiFi] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    addLog("WiFi connected", "info");
+  } else {
+    Serial.println("[WiFi] Connection failed");
+    addLog("WiFi connection failed", "error");
+  }
   return ok;
 }
 
@@ -467,7 +510,7 @@ int inquireServer() {
 // ══════════════════════════════════════
 
 String topicOf(const String& leaf) {
-  return String("manazel/devices/") + SERIAL_NUMBER + "/" + leaf;
+  return String("mnazilona/devices/") + SERIAL_NUMBER + "/" + leaf;
 }
 
 void mqttPublishStatus(const char* st) {
@@ -502,6 +545,26 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 
   String action = doc["command"] | "";
+  String source = doc["source"] | "";
+
+  // Check admin lock - block user commands but allow admin commands
+  if (source != "admin") {
+    prefs.begin("config", true);
+    bool adminLocked = prefs.getBool("adminLocked", false);
+    prefs.end();
+    if (adminLocked && (action == "open" || action == "on" || action == "toggle" || action == "off")) {
+      Serial.println("[MQTT] Command blocked - device is admin locked");
+      if (mqttClient.connected()) {
+        StaticJsonDocument<128> rDoc;
+        rDoc["error"] = "admin_locked";
+        rDoc["message"] = "Device is locked by admin";
+        String rPayload;
+        serializeJson(rDoc, rPayload);
+        mqttClient.publish(topicOf("dp/report").c_str(), rPayload.c_str());
+      }
+      return;
+    }
+  }
 
   // ── open / on / toggle = نفس الشي: pulse ثانيتين ──
   if (action == "open" || action == "on" || action == "toggle") {
@@ -542,6 +605,41 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     delay(500);
     ESP.restart();
   }
+  // ── factory_reset = ريسيت كامل من الأدمن ──
+  else if (action == "factory_reset") {
+    Serial.println("[MQTT] Factory reset by admin");
+    mqttPublishStatus("offline");
+    clearAllSettings();
+    delay(500);
+    ESP.restart();
+  }
+  // ── admin_lock = قفل/فتح إداري ──
+  else if (action == "admin_lock") {
+    bool locked = doc["locked"] | false;
+    const char* reason = doc["reason"] | "admin";
+    Serial.printf("[MQTT] Admin lock: %s (reason: %s)\n", locked ? "LOCKED" : "UNLOCKED", reason);
+    // Store lock state - device will refuse user commands when locked
+    prefs.begin("config", false);
+    prefs.putBool("adminLocked", locked);
+    prefs.end();
+    // Report state
+    if (mqttClient.connected()) {
+      StaticJsonDocument<128> rDoc;
+      rDoc["adminLocked"] = locked;
+      rDoc["reason"] = reason;
+      String rPayload;
+      serializeJson(rDoc, rPayload);
+      mqttClient.publish(topicOf("dp/report").c_str(), rPayload.c_str());
+    }
+  }
+  // ── disconnect = فصل بأمر من الأدمن (حظر) ──
+  else if (action == "disconnect") {
+    const char* reason = doc["reason"] | "admin";
+    Serial.printf("[MQTT] Disconnect command (reason: %s)\n", reason);
+    mqttPublishStatus("offline");
+    mqttClient.disconnect();
+    // Don't clear settings - device can reconnect if unbanned
+  }
   else {
     Serial.printf("[MQTT] Unknown command: %s\n", action.c_str());
   }
@@ -564,12 +662,14 @@ bool connectMQTT() {
     mqttPublishHeartbeat();
     mqttReconnectCount = 0;
     Serial.println("[MQTT] Connected!");
+    addLog("MQTT connected to broker", "info");
     return true;
   }
 
   mqttReconnectCount++;
   Serial.printf("[MQTT] Failed, rc=%d (attempt %d/%d)\n",
                 mqttClient.state(), mqttReconnectCount, MQTT_MAX_RECONNECTS);
+  addLog("MQTT connection failed", "error");
 
   if (mqttReconnectCount >= MQTT_MAX_RECONNECTS) {
     Serial.println("[MQTT] Too many failures - re-doing server inquiry");
@@ -595,6 +695,163 @@ bool connectMQTT() {
   }
 
   return false;
+}
+
+
+// ══════════════════════════════════════
+//    LOCAL API SERVER (mDNS + HTTP)
+//    يشتغل وقت الجهاز أونلاين عشان
+//    التطبيق يقدر يتحكم بدون كلاود
+// ══════════════════════════════════════
+
+void startLocalServer() {
+  if (localServerRunning) return;
+
+  // mDNS: broadcast as "mnazilona-SN-001.local"
+  String hostname = "mnazilona-" + String(SERIAL_NUMBER);
+  hostname.toLowerCase();
+  hostname.replace(" ", "-");
+
+  if (MDNS.begin(hostname.c_str())) {
+    // Register mDNS service: _mnazilona._tcp with TXT records
+    MDNS.addService("mnazilona", "tcp", 8080);
+    MDNS.addServiceTxt("mnazilona", "tcp", "serial", SERIAL_NUMBER);
+    MDNS.addServiceTxt("mnazilona", "tcp", "sn", SERIAL_NUMBER);
+    MDNS.addServiceTxt("mnazilona", "tcp", "type", "relay");
+    MDNS.addServiceTxt("mnazilona", "tcp", "fw", FIRMWARE_VERSION);
+    Serial.printf("[mDNS] Broadcasting: %s.local:8080\n", hostname.c_str());
+  } else {
+    Serial.println("[mDNS] Failed to start");
+  }
+
+  // Local command endpoint
+  localServer.on("/command", HTTP_POST, []() {
+    if (!localServer.hasArg("plain")) {
+      localServer.send(400, "application/json", "{\"status\":\"error\",\"message\":\"No body\"}");
+      return;
+    }
+
+    StaticJsonDocument<256> doc;
+    if (deserializeJson(doc, localServer.arg("plain"))) {
+      localServer.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid JSON\"}");
+      return;
+    }
+
+    String action = doc["command"] | "";
+    action.trim();
+    action.toLowerCase();
+
+    // Add CORS header to all command responses
+    localServer.sendHeader("Access-Control-Allow-Origin", "*");
+
+    // Check admin lock for control commands
+    if (action == "open" || action == "on" || action == "toggle") {
+      prefs.begin("config", true);
+      bool adminLocked = prefs.getBool("adminLocked", false);
+      prefs.end();
+      if (adminLocked) {
+        localServer.send(403, "application/json", "{\"status\":\"error\",\"message\":\"Device is locked by admin\"}");
+        Serial.println("[LocalAPI] Command blocked - admin locked");
+        return;
+      }
+      startRelayPulse();
+      addLog("Command: open (via local)", "info");
+      localServer.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Command executed locally\"}");
+      Serial.println("[LocalAPI] Command: open (local)");
+    }
+    else if (action == "restart") {
+      addLog("Restart command (via local)", "warning");
+      localServer.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Restarting...\"}");
+      delay(500);
+      ESP.restart();
+    }
+    else if (action == "status") {
+      prefs.begin("config", true);
+      bool isLocked = prefs.getBool("adminLocked", false);
+      prefs.end();
+      StaticJsonDocument<256> rDoc;
+      rDoc["relay"]       = (relayOffTime > 0) ? "opened" : "closed";
+      rDoc["doorState"]   = lastDoorState ? "open" : "closed";
+      rDoc["rssi"]        = WiFi.RSSI();
+      rDoc["fw"]          = FIRMWARE_VERSION;
+      rDoc["local"]       = true;
+      rDoc["adminLocked"] = isLocked;
+      String response;
+      serializeJson(rDoc, response);
+      localServer.send(200, "application/json", response);
+    }
+    else {
+      localServer.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Unknown command\"}");
+    }
+  });
+
+  // Local status endpoint — full device state
+  localServer.on("/status", HTTP_GET, []() {
+    localServer.sendHeader("Access-Control-Allow-Origin", "*");
+    StaticJsonDocument<384> doc;
+    doc["serial"]    = SERIAL_NUMBER;
+    doc["name"]      = DEVICE_NAME;
+    doc["type"]      = "relay";
+    doc["fw"]        = FIRMWARE_VERSION;
+    doc["relay"]     = (relayOffTime > 0) ? "opened" : "closed";
+    doc["doorState"] = lastDoorState ? "open" : "closed";
+    doc["isOnline"]  = true;
+    doc["rssi"]      = WiFi.RSSI();
+    doc["heap"]      = ESP.getFreeHeap();
+    doc["uptime"]    = millis() / 1000;
+    doc["ip"]        = WiFi.localIP().toString();
+    doc["local"]     = true;
+    doc["mqttConnected"] = mqttClient.connected();
+    String response;
+    serializeJson(doc, response);
+    localServer.send(200, "application/json", response);
+  });
+
+  // Local logs endpoint — returns last N logs from circular buffer
+  localServer.on("/logs", HTTP_GET, []() {
+    localServer.sendHeader("Access-Control-Allow-Origin", "*");
+    // Build JSON array of logs (newest first)
+    DynamicJsonDocument doc(4096);
+    JsonArray logsArr = doc.createNestedArray("logs");
+    doc["count"] = logCount;
+    doc["local"] = true;
+
+    // Read from circular buffer newest first
+    for (int i = 0; i < logCount; i++) {
+      int idx = (logHead - 1 - i + MAX_LOCAL_LOGS) % MAX_LOCAL_LOGS;
+      JsonObject entry = logsArr.createNestedObject();
+      entry["timestamp"] = localLogs[idx].timestamp;
+      entry["message"]   = localLogs[idx].message;
+      entry["type"]      = localLogs[idx].type;
+    }
+
+    String response;
+    serializeJson(doc, response);
+    localServer.send(200, "application/json", response);
+  });
+
+  // CORS support for all local endpoints
+  auto handleLocalCORS = []() {
+    localServer.sendHeader("Access-Control-Allow-Origin", "*");
+    localServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    localServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    localServer.send(204);
+  };
+  localServer.on("/command", HTTP_OPTIONS, handleLocalCORS);
+  localServer.on("/status",  HTTP_OPTIONS, handleLocalCORS);
+  localServer.on("/logs",    HTTP_OPTIONS, handleLocalCORS);
+
+  localServer.begin();
+  localServerRunning = true;
+  Serial.println("[LocalAPI] Server started on port 8080");
+}
+
+void stopLocalServer() {
+  if (!localServerRunning) return;
+  localServer.stop();
+  MDNS.end();
+  localServerRunning = false;
+  Serial.println("[LocalAPI] Server stopped");
 }
 
 
@@ -927,9 +1184,17 @@ void handleStateMachine() {
     case STATE_ONLINE:
       if (WiFi.status() != WL_CONNECTED) {
         currentState = STATE_WIFI_RECONNECTING;
+        stopLocalServer();
         setLED_offline();
         return;
       }
+
+      // Start local API server if not running
+      if (!localServerRunning) {
+        startLocalServer();
+      }
+      localServer.handleClient();
+
       if (!mqttClient.connected()) {
         if (millis() - lastMqttReconnectMs > MQTT_RECONNECT_MS) {
           lastMqttReconnectMs = millis();
@@ -1003,7 +1268,7 @@ void setup() {
   WiFi.mode(WIFI_MODE_NULL);
 
   Serial.println("\n======================================");
-  Serial.printf("  Manazel IoT - %s\n", DEVICE_NAME);
+  Serial.printf("  Mnazilona IoT - %s\n", DEVICE_NAME);
   Serial.printf("  SN:  %s\n", SERIAL_NUMBER);
   Serial.printf("  FW:  %s\n", FIRMWARE_VERSION);
   Serial.printf("  MAC: %s\n", macAddr.c_str());

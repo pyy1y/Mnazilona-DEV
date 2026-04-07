@@ -13,18 +13,17 @@
       "buildNumber": "1",
       "bundleIdentifier": "com.mnazilona.MnazilonaApp",
       "infoPlist": {
-        "NSBluetoothAlwaysUsageDescription": "Required to connect to Manazel devices for setup and control.",
-        "NSBluetoothPeripheralUsageDescription": "Required to set up and pair with your Manazel device via BLE.",
-        "NSLocalNetworkUsageDescription": "Required to communicate with Manazel devices on your local network during setup.",
+        "NSBluetoothAlwaysUsageDescription": "Required to connect to Mnazilona devices for setup and control.",
+        "NSBluetoothPeripheralUsageDescription": "Required to set up and pair with your Mnazilona device via BLE.",
+        "NSLocalNetworkUsageDescription": "Required to communicate with Mnazilona devices on your local network during setup.",
         "NSLocationWhenInUseUsageDescription": "Required to detect the WiFi network during device setup.",
         "NSBonjourServices": [
-          "_http._tcp",
+          "_mnazilona._tcp",
           "_http._tcp"
         ],
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true
-        },
-        "ITSAppUsesNonExemptEncryption": false
+        }
       },
       "entitlements": {
         "com.apple.developer.networking.HotspotConfiguration": true,
@@ -50,7 +49,8 @@
         "android.permission.CHANGE_WIFI_STATE",
         "android.permission.CHANGE_NETWORK_STATE"
       ],
-      "package": "com.mnazilona.MnazilonaApp"
+      "package": "com.mnazilona.MnazilonaApp",
+      "usesCleartextTraffic": true
     },
     "web": {
       "output": "static",
@@ -76,13 +76,6 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    },
-    "extra": {
-      "router": {},
-      "eas": {
-        "projectId": "055b3ee0-09e6-48db-ae97-c80bc0df293f"
-      }
-    },
-    "owner": "pyy1y"
+    }
   }
 }

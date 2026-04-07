@@ -25,13 +25,12 @@ import { useRouter } from "expo-router";
 import WifiManager from "react-native-wifi-reborn";
 import { API_URL, ENDPOINTS } from "../constants/api";
 import { TokenManager } from "../utils/api";
-import { getUserFromToken } from "../utils/auth";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 
 const BRAND = "#2E5B8E";
 const ESP_IP = "http://192.168.4.1";
-const AP_PASSWORD = process.env.EXPO_PUBLIC_AP_PASSWORD || "manazel123";
-const AP_SSID = process.env.EXPO_PUBLIC_AP_SSID || "Mnazilona_Setup";
+const AP_PASSWORD = "mnazilona123";
+const AP_SSID = "Mnazilona_Setup";
 
 // ═══════════════════════════════════════
 // Types
@@ -228,7 +227,7 @@ export default function PairingScreen() {
 
         if (data.serial) {
           setSerialNumberSynced(data.serial);
-          setDeviceName(data.name || "Manazel Device");
+          setDeviceName(data.name || "Mnazilona Device");
           const secret = data.deviceSecret || data.device_secret || data.secret;
           if (secret) {
             setDeviceSecretSynced(secret);
@@ -324,22 +323,10 @@ export default function PairingScreen() {
       // ✅ زيادة الـ timeout لأن الجهاز يجرب الواي فاي قبل ما يرد (AP+STA)
       const timeout = setTimeout(() => controller.abort(), 20000);
 
-      // ── أرسل userId عشان السيرفر يعرف إنه نفس المالك عند إعادة الربط ──
-      let userId = "";
-      try {
-        const token = await TokenManager.get();
-        if (token) {
-          const user = getUserFromToken(token);
-          if (user) userId = user.id;
-        }
-      } catch (e) {
-        if (__DEV__) console.warn("[Pairing] Could not extract userId:", e);
-      }
-
       const res = await fetch(`${ESP_IP}/setup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ssid, password, userId }),
+        body: JSON.stringify({ ssid, password }),
         signal: controller.signal,
       });
 
