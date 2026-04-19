@@ -12,6 +12,25 @@ import {
 } from './localDiscovery';
 
 // ======================================
+// Command Whitelist
+// ======================================
+const ALLOWED_COMMANDS = new Set([
+  // Garage
+  'open', 'close', 'stop',
+  // Light
+  'on', 'off',
+  // Dimmer
+  'brightness',
+  // Lock
+  'lock', 'add_passcode', 'add_fingerprint', 'add_card',
+  'remove_passcode', 'remove_fingerprint', 'remove_card',
+  // AC
+  'set_temperature', 'set_mode', 'set_fan_mode', 'set_swing_mode', 'set_preset_mode',
+  // Security
+  'set_security_mode',
+]);
+
+// ======================================
 // Types
 // ======================================
 
@@ -58,6 +77,29 @@ export async function smartSendCommand(
   command: string,
   params?: Record<string, any>
 ): Promise<CommandResult> {
+  // Validate command against whitelist
+  if (!ALLOWED_COMMANDS.has(command)) {
+    return {
+      success: false,
+      message: `Unknown command: ${command}`,
+      status: 400,
+      local: false,
+    };
+  }
+
+  // Validate serial number format (alphanumeric, max 32 chars)
+  if (!serialNumber || serialNumber.length > 32 || !/^[A-Za-z0-9_-]+$/.test(serialNumber)) {
+    return { success: false, message: 'Invalid serial number', status: 400, local: false };
+  }
+
+  // Validate params size to prevent oversized payloads
+  if (params) {
+    const paramsStr = JSON.stringify(params);
+    if (paramsStr.length > 1024) {
+      return { success: false, message: 'Command params too large', status: 400, local: false };
+    }
+  }
+
   // Try local first
   if (isDeviceLocal(serialNumber)) {
     const localResult = await sendLocalCommand(serialNumber, command, params);

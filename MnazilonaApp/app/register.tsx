@@ -1,6 +1,6 @@
 // app/register.tsx
 
-import React, { useState, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
@@ -15,10 +15,11 @@ import {
   Modal,
   FlatList,
 } from 'react-native';
-import { useRouter, Link } from 'expo-router';
+import { useRouter, Link, useNavigation } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 
+import * as SecureStore from 'expo-secure-store';
 import { api } from '../utils/api';
 import { ENDPOINTS } from '../constants/api';
 import {
@@ -71,13 +72,20 @@ type RegisterDraft = {
   city: string;
 };
 
-// Global draft storage
-declare global {
-  var __registerDraft: RegisterDraft | undefined;
-}
+const REGISTER_DRAFT_KEY = '__register_draft';
 
 export default function RegisterScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
+
+  // Clear password when leaving screen
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('blur', () => {
+      setPassword('');
+      setIsPasswordVisible(false);
+    });
+    return unsubscribe;
+  }, [navigation]);
 
   // Form state
   const [name, setName] = useState('');
@@ -200,7 +208,7 @@ export default function RegisterScreen() {
     if (!isStrongPassword(password)) {
       Alert.alert(
         'Weak Password',
-        'Password must be at least 8 characters with 1 uppercase letter and 1 number.'
+        'Password must be at least 8 characters with uppercase, lowercase, number, and special character.'
       );
       return null;
     }
@@ -254,8 +262,8 @@ export default function RegisterScreen() {
         return;
       }
 
-      // Store draft in memory (not in URL params for security)
-      globalThis.__registerDraft = validatedData;
+      // Store draft in SecureStore (encrypted, not in memory or URL params)
+      await SecureStore.setItemAsync(REGISTER_DRAFT_KEY, JSON.stringify(validatedData));
 
       // Navigate to OTP
       router.push({
@@ -482,7 +490,7 @@ export default function RegisterScreen() {
 
         {/* Password Helper Text */}
         <Text style={styles.helperText}>
-          Must contain at least 8 characters, 1 number, and 1 uppercase letter.
+          Must contain at least 8 characters, uppercase, lowercase, number, and special character.
         </Text>
 
         {/* Date of Birth */}

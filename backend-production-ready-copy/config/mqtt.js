@@ -2,6 +2,9 @@ const mqtt = require('mqtt');
 const Device = require('../models/Device');
 const DeviceLog = require('../models/DeviceLog');
 const { emitToAdmins } = require('./socket');
+const logger = require('../utils/logger');
+
+const fs = require('fs');
 
 const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://localhost';
 const MQTT_BROKER_HOST = process.env.MQTT_BROKER_HOST || 'localhost';
@@ -16,10 +19,27 @@ const mqttOptions = {
   keepalive: 60,
 };
 
+// MQTT TLS: if cert files are configured, enable TLS
+const mqttCaPath = process.env.MQTT_CA_PATH;
+const mqttCertPath = process.env.MQTT_CERT_PATH;
+const mqttKeyPath = process.env.MQTT_KEY_PATH;
+
+if (mqttCaPath && fs.existsSync(mqttCaPath)) {
+  mqttOptions.ca = [fs.readFileSync(mqttCaPath)];
+  mqttOptions.rejectUnauthorized = process.env.MQTT_REJECT_UNAUTHORIZED !== 'false';
+  logger.info('MQTT TLS: CA certificate loaded');
+}
+if (mqttCertPath && mqttKeyPath && fs.existsSync(mqttCertPath) && fs.existsSync(mqttKeyPath)) {
+  mqttOptions.cert = fs.readFileSync(mqttCertPath);
+  mqttOptions.key = fs.readFileSync(mqttKeyPath);
+  logger.info('MQTT TLS: Client certificate loaded');
+}
+
 const TOPICS = {
   STATUS: 'mnazilona/devices/+/status',
   HEARTBEAT: 'mnazilona/devices/+/heartbeat',
   DP_REPORT: 'mnazilona/devices/+/dp/report',
+  OTA_PROGRESS: 'mnazilona/devices/+/ota/progress',
 };
 
 let mqttClient = null;
@@ -47,6 +67,32 @@ const safeJsonParse = (str) => {
 const recentLogs = new Map();
 const DEDUP_WINDOW_MS = 10000;
 
+// Device existence cache - avoids DB query on every MQTT message
+const deviceExistsCache = new Map();
+const DEVICE_CACHE_TTL_MS = 60000; // 1 minute
+
+const isDeviceKnown = async (serialNumber) => {
+  const sn = serialNumber.toUpperCase();
+  const cached = deviceExistsCache.get(sn);
+  const now = Date.now();
+
+  if (cached && now - cached.time < DEVICE_CACHE_TTL_MS) {
+    return cached.exists;
+  }
+
+  const exists = !!(await Device.exists({ serialNumber: sn }));
+  deviceExistsCache.set(sn, { exists, time: now });
+
+  // Cleanup old entries periodically
+  if (deviceExistsCache.size > 1000) {
+    for (const [key, val] of deviceExistsCache) {
+      if (now - val.time > DEVICE_CACHE_TTL_MS) deviceExistsCache.delete(key);
+    }
+  }
+
+  return exists;
+};
+
 const logDevice = async (serialNumber, type, message, source = 'device') => {
   try {
     const key = `${serialNumber.toUpperCase()}:${message}`;
@@ -63,7 +109,7 @@ const logDevice = async (serialNumber, type, message, source = 'device') => {
 
     await DeviceLog.create({ serialNumber: serialNumber.toUpperCase(), type, message, source });
   } catch (err) {
-    console.error(`DeviceLog failed: ${err.message}`);
+    logger.error('DeviceLog failed', { error: err.message });
   }
 };
 
@@ -113,7 +159,7 @@ const handleHeartbeatMessage = async (serialNumber, message) => {
 const handleDpReportMessage = async (serialNumber, message) => {
   const payload = safeJsonParse(message);
   if (!payload) {
-    console.warn(`Invalid JSON on dp/report from ${serialNumber}`);
+    logger.warn('Invalid JSON on dp/report', { serialNumber });
     return;
   }
   await Device.findOneAndUpdate({ serialNumber }, { isOnline: true, lastSeen: new Date() });
@@ -137,6 +183,46 @@ const handleDpReportMessage = async (serialNumber, message) => {
   });
 };
 
+const handleOtaProgressMessage = async (serialNumber, message) => {
+  const payload = safeJsonParse(message);
+  if (!payload) return;
+
+  const { status, progress, version, error } = payload;
+  const update = { lastSeen: new Date(), isOnline: true };
+
+  if (status) update.otaStatus = status;
+  if (progress !== undefined) update.otaProgress = progress;
+  if (version) update.otaTargetVersion = version;
+  if (error) update.otaError = error;
+
+  if (status === 'downloading' && !update.otaStartedAt) {
+    update.otaStartedAt = new Date();
+  }
+  if (status === 'success' || status === 'failed' || status === 'rolled_back') {
+    update.otaCompletedAt = new Date();
+  }
+  if (status === 'success' && version) {
+    update.firmwareVersion = version;
+    update.otaProgress = 100;
+  }
+
+  await Device.findOneAndUpdate({ serialNumber }, update);
+
+  await logDevice(serialNumber,
+    status === 'failed' || status === 'rolled_back' ? 'error' : 'info',
+    `OTA ${status}${progress !== undefined ? ` (${progress}%)` : ''}${version ? ` v${version}` : ''}${error ? `: ${error}` : ''}`,
+    'device'
+  );
+
+  emitToAdmins('ota:progress', {
+    serialNumber: serialNumber.toUpperCase(),
+    status,
+    progress,
+    version,
+    error,
+  });
+};
+
 const handleMessage = async (topic, messageBuf) => {
   try {
     const parsed = parseTopicParts(topic);
@@ -145,8 +231,8 @@ const handleMessage = async (topic, messageBuf) => {
     const { serialNumber, leaf } = parsed;
     const message = messageBuf.toString();
 
-    // Only process messages for devices that exist in the DB (paired devices)
-    const deviceExists = await Device.exists({ serialNumber: serialNumber.toUpperCase() });
+    // Only process messages for devices that exist in the DB (cached for 1 min)
+    const deviceExists = await isDeviceKnown(serialNumber);
     if (!deviceExists) return;
 
     switch (leaf) {
@@ -159,31 +245,34 @@ const handleMessage = async (topic, messageBuf) => {
       case 'dp/report':
         await handleDpReportMessage(serialNumber, message);
         break;
+      case 'ota/progress':
+        await handleOtaProgressMessage(serialNumber, message);
+        break;
     }
   } catch (error) {
-    console.error('Error handling MQTT message:', error.message);
+    logger.error('Error handling MQTT message', { error: error.message });
   }
 };
 
 const setupMQTT = () => {
   if (!process.env.MQTT_PASSWORD) {
-    console.warn('WARNING: MQTT_PASSWORD not set');
+    logger.warn('MQTT_PASSWORD not set');
   }
 
   mqttClient = mqtt.connect(MQTT_BROKER_URL, mqttOptions);
 
   mqttClient.on('connect', () => {
     isConnected = true;
-    console.log(`MQTT connected to ${MQTT_BROKER_URL}`);
+    logger.info(`MQTT connected to ${MQTT_BROKER_URL}`);
     mqttClient.subscribe(Object.values(TOPICS), { qos: 1 }, (err) => {
-      if (err) console.error('MQTT subscription error:', err.message);
-      else console.log('MQTT subscribed to device topics');
+      if (err) logger.error('MQTT subscription error', { error: err.message });
+      else logger.info('MQTT subscribed to device topics');
     });
   });
 
   mqttClient.on('message', handleMessage);
-  mqttClient.on('error', (err) => { console.error('MQTT error:', err.message); isConnected = false; emitToAdmins('service:status', { mqtt: 'disconnected' }); });
-  mqttClient.on('reconnect', () => console.log('MQTT reconnecting...'));
+  mqttClient.on('error', (err) => { logger.error('MQTT error', { error: err.message }); isConnected = false; emitToAdmins('service:status', { mqtt: 'disconnected' }); });
+  mqttClient.on('reconnect', () => logger.info('MQTT reconnecting...'));
   mqttClient.on('close', () => { isConnected = false; emitToAdmins('service:status', { mqtt: 'disconnected' }); });
   mqttClient.on('offline', () => { isConnected = false; emitToAdmins('service:status', { mqtt: 'disconnected' }); });
 
@@ -207,7 +296,7 @@ const disconnectMQTT = () => {
   return new Promise((resolve) => {
     if (!mqttClient) return resolve();
     mqttClient.end(false, {}, () => {
-      console.log('MQTT disconnected');
+      logger.info('MQTT disconnected');
       isConnected = false;
       resolve();
     });

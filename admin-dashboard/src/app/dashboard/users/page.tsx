@@ -2,6 +2,10 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { getUsers, deactivateUser, activateUser, forceLogoutUser, deleteUser } from '@/lib/api';
+import { useToast } from '@/components/Toast';
+import { getErrorMessage } from '@/lib/types';
+import { useDebounce } from '@/lib/hooks';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import DataTable from '@/components/DataTable';
 import StatusBadge from '@/components/StatusBadge';
 import { Search, UserX, UserCheck, LogOut, Trash2 } from 'lucide-react';
@@ -21,42 +25,44 @@ interface UserItem {
 }
 
 export default function UsersPage() {
+  const toast = useToast();
   const [users, setUsers] = useState<UserItem[]>([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 300);
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{ action: string; userId: string; userName: string } | null>(null);
 
   const fetchUsers = useCallback(async (page = 1) => {
     setLoading(true);
     try {
       const params: Record<string, string | number> = { page, limit: 20 };
-      if (search) params.search = search;
+      if (debouncedSearch) params.search = debouncedSearch;
       if (status) params.status = status;
       const res = await getUsers(params);
       setUsers(res.data.users);
       setPagination(res.data.pagination);
     } catch (err) {
-      console.error(err);
+      toast.error(getErrorMessage(err, 'Failed to load users'));
     } finally {
       setLoading(false);
     }
-  }, [search, status]);
+  }, [debouncedSearch, status, toast]);
 
-  useEffect(() => {
-    fetchUsers();
-  }, [fetchUsers]);
+  useEffect(() => { fetchUsers(); }, [fetchUsers]);
 
-  const handleAction = async (action: string, userId: string, userName: string) => {
-    const messages: Record<string, string> = {
-      deactivate: `Deactivate ${userName}'s account?`,
-      activate: `Activate ${userName}'s account?`,
-      forceLogout: `Invalidate all sessions for ${userName}?`,
-      delete: `Are you sure you want to delete ${userName}'s account? This cannot be undone.`,
-    };
+  const confirmMessages: Record<string, { title: string; message: string; variant: 'danger' | 'warning' | 'default' }> = {
+    deactivate: { title: 'Deactivate Account', message: 'This will prevent the user from logging in.', variant: 'warning' },
+    activate: { title: 'Activate Account', message: 'This will restore the user\'s access.', variant: 'default' },
+    forceLogout: { title: 'Force Logout', message: 'This will invalidate all active sessions for this user.', variant: 'warning' },
+    delete: { title: 'Delete Account', message: 'This action cannot be undone. All user data will be permanently removed.', variant: 'danger' },
+  };
 
-    if (!confirm(messages[action])) return;
+  const executeAction = async () => {
+    if (!confirmAction) return;
+    const { action, userId } = confirmAction;
 
     setActionLoading(userId);
     try {
@@ -64,12 +70,13 @@ export default function UsersPage() {
       if (action === 'activate') await activateUser(userId);
       if (action === 'forceLogout') await forceLogoutUser(userId);
       if (action === 'delete') await deleteUser(userId);
+      toast.success(`User ${action}d successfully`);
       fetchUsers(pagination.page);
     } catch (err) {
-      console.error(err);
-      alert('Action failed');
+      toast.error(getErrorMessage(err, 'Action failed'));
     } finally {
       setActionLoading(null);
+      setConfirmAction(null);
     }
   };
 
@@ -116,7 +123,7 @@ export default function UsersPage() {
             <>
               {user.isActive ? (
                 <button
-                  onClick={(e) => { e.stopPropagation(); handleAction('deactivate', user.id, user.name); }}
+                  onClick={(e) => { e.stopPropagation(); setConfirmAction({ action: 'deactivate', userId: user.id, userName: user.name }); }}
                   disabled={actionLoading === user.id}
                   className="p-1.5 text-yellow-600 hover:bg-yellow-50 rounded-lg transition-colors"
                   title="Deactivate"
@@ -125,7 +132,7 @@ export default function UsersPage() {
                 </button>
               ) : (
                 <button
-                  onClick={(e) => { e.stopPropagation(); handleAction('activate', user.id, user.name); }}
+                  onClick={(e) => { e.stopPropagation(); setConfirmAction({ action: 'activate', userId: user.id, userName: user.name }); }}
                   disabled={actionLoading === user.id}
                   className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
                   title="Activate"
@@ -134,7 +141,7 @@ export default function UsersPage() {
                 </button>
               )}
               <button
-                onClick={(e) => { e.stopPropagation(); handleAction('forceLogout', user.id, user.name); }}
+                onClick={(e) => { e.stopPropagation(); setConfirmAction({ action: 'forceLogout', userId: user.id, userName: user.name }); }}
                 disabled={actionLoading === user.id}
                 className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
                 title="Force Logout"
@@ -142,7 +149,7 @@ export default function UsersPage() {
                 <LogOut size={16} />
               </button>
               <button
-                onClick={(e) => { e.stopPropagation(); handleAction('delete', user.id, user.name); }}
+                onClick={(e) => { e.stopPropagation(); setConfirmAction({ action: 'delete', userId: user.id, userName: user.name }); }}
                 disabled={actionLoading === user.id}
                 className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                 title="Delete"
@@ -194,6 +201,21 @@ export default function UsersPage() {
         loading={loading}
         emptyMessage="No users found"
       />
+
+      {/* Confirm Dialog */}
+      {confirmAction && (
+        <ConfirmDialog
+          open={!!confirmAction}
+          title={`${confirmMessages[confirmAction.action].title} - ${confirmAction.userName}`}
+          message={confirmMessages[confirmAction.action].message}
+          variant={confirmMessages[confirmAction.action].variant}
+          confirmLabel={confirmMessages[confirmAction.action].title}
+          typeToConfirm={confirmAction.action === 'delete' ? confirmAction.userName : undefined}
+          onConfirm={executeAction}
+          onCancel={() => setConfirmAction(null)}
+          loading={!!actionLoading}
+        />
+      )}
     </div>
   );
 }

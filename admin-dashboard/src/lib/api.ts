@@ -3,6 +3,9 @@ import Cookies from 'js-cookie';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
 
+// NOTE: When you get a domain, update NEXT_PUBLIC_API_URL to use HTTPS:
+// NEXT_PUBLIC_API_URL=https://your-domain.com
+
 const api = axios.create({
   baseURL: `${API_BASE}/admin`,
   timeout: 15000,
@@ -18,17 +21,70 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Handle 401 globally (expired/invalid token only)
+// Handle 401 globally - attempt refresh before redirecting to login
+let isRefreshing = false;
+let failedQueue: { resolve: (token: string) => void; reject: (err: unknown) => void }[] = [];
+
+const processQueue = (error: unknown, token: string | null) => {
+  failedQueue.forEach((prom) => {
+    if (token) prom.resolve(token);
+    else prom.reject(error);
+  });
+  failedQueue = [];
+};
+
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
-    if (error.response?.status === 401) {
-      Cookies.remove('admin_token');
-      Cookies.remove('admin_data');
-      if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
-        window.location.href = '/login';
+  async (error) => {
+    const originalRequest = error.config;
+
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      // Don't retry refresh-token requests
+      if (originalRequest.url?.includes('/login')) {
+        return Promise.reject(error);
+      }
+
+      const refreshToken = Cookies.get('admin_refresh_token');
+      if (!refreshToken) {
+        Cookies.remove('admin_token');
+        if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
+          window.location.href = '/login';
+        }
+        return Promise.reject(error);
+      }
+
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject });
+        }).then((token) => {
+          originalRequest.headers.Authorization = `Bearer ${token}`;
+          return api(originalRequest);
+        });
+      }
+
+      originalRequest._retry = true;
+      isRefreshing = true;
+
+      try {
+        const { data } = await axios.post(`${API_BASE}/auth/refresh-token`, { refreshToken });
+        Cookies.set('admin_token', data.token, { sameSite: 'strict', secure: typeof window !== 'undefined' && window.location.protocol === 'https:', path: '/' });
+        Cookies.set('admin_refresh_token', data.refreshToken, { sameSite: 'strict', secure: typeof window !== 'undefined' && window.location.protocol === 'https:', path: '/', expires: 7 });
+        processQueue(null, data.token);
+        originalRequest.headers.Authorization = `Bearer ${data.token}`;
+        return api(originalRequest);
+      } catch (refreshError) {
+        processQueue(refreshError, null);
+        Cookies.remove('admin_token');
+        Cookies.remove('admin_refresh_token');
+        if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
+          window.location.href = '/login';
+        }
+        return Promise.reject(refreshError);
+      } finally {
+        isRefreshing = false;
       }
     }
+
     return Promise.reject(error);
   }
 );
@@ -101,12 +157,18 @@ export const unlockDevice = (serialNumber: string) => api.post(`/devices/${seria
 // Firmware Management
 export const listFirmware = (params?: Record<string, string | number>) =>
   api.get('/firmware', { params });
-export const createFirmware = (data: Record<string, unknown>) =>
-  api.post('/firmware', data);
-export const updateFirmware = (firmwareId: string, data: Record<string, unknown>) =>
-  api.put(`/firmware/${firmwareId}`, data);
+export const createFirmware = (data: FormData) =>
+  api.post('/firmware', data, { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000 });
+export const updateFirmware = (firmwareId: string, data: FormData) =>
+  api.put(`/firmware/${firmwareId}`, data, { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000 });
 export const deleteFirmware = (firmwareId: string) => api.delete(`/firmware/${firmwareId}`);
 export const getFirmwareStats = () => api.get('/firmware/stats');
+
+// OTA Management
+export const pushOtaUpdate = (firmwareId: string, serialNumber?: string) =>
+  api.post(`/firmware/${firmwareId}/push`, serialNumber ? { serialNumber } : {});
+export const getOtaStatus = (params?: Record<string, string | number>) =>
+  api.get('/ota/status', { params });
 
 // IP Blacklist
 export const getBlacklist = (params?: Record<string, string | number>) =>

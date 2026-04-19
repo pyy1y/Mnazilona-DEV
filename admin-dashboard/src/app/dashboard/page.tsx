@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { getDashboard } from '@/lib/api';
+import { useToast } from '@/components/Toast';
+import { getErrorMessage } from '@/lib/types';
 import { useSocket } from '@/lib/socket';
 import StatCard from '@/components/StatCard';
 import { Users, Cpu, Wifi, WifiOff, ShieldAlert, Activity, Database, Radio, Zap } from 'lucide-react';
@@ -25,6 +27,7 @@ interface DeviceStatusEvent {
 }
 
 export default function DashboardPage() {
+  const toast = useToast();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const { connected, on } = useSocket();
@@ -33,9 +36,9 @@ export default function DashboardPage() {
   useEffect(() => {
     getDashboard()
       .then((res) => setData(res.data))
-      .catch(console.error)
+      .catch((err) => toast.error(getErrorMessage(err, 'Failed to load dashboard')))
       .finally(() => setLoading(false));
-  }, []);
+  }, [toast]);
 
   // Real-time device status updates
   const handleDeviceStatus = useCallback((event: unknown) => {

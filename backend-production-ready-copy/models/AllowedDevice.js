@@ -1,5 +1,8 @@
 const mongoose = require('mongoose');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
+
+const MQTT_BCRYPT_ROUNDS = 10;
 
 const allowedDeviceSchema = new mongoose.Schema(
   {
@@ -35,7 +38,8 @@ const allowedDeviceSchema = new mongoose.Schema(
     isBanned: { type: Boolean, default: false },
     banReason: { type: String, default: null },
     mqttUsername: { type: String, default: null, select: false },
-    mqttPassword: { type: String, default: null, select: false },
+    mqttPassword: { type: String, default: null, select: false }, // plaintext - returned to device once during inquiry
+    mqttPasswordHash: { type: String, default: null, select: false }, // bcrypt hash - used for MQTT broker auth
     notes: { type: String, default: '', maxlength: 500 },
     failedAttempts: { type: Number, default: 0 },
     lastFailedAttempt: { type: Date, default: null },
@@ -110,7 +114,15 @@ allowedDeviceSchema.statics.findAllowed = function (serialNumber) {
 allowedDeviceSchema.statics.findAllowedWithSecret = function (serialNumber) {
   return this.findOne({
     serialNumber: serialNumber.toUpperCase().trim(),
-  }).select('+deviceSecret +mqttUsername +mqttPassword');
+  }).select('+deviceSecret +mqttUsername +mqttPassword +mqttPasswordHash');
+};
+
+allowedDeviceSchema.methods.verifyMqttPassword = async function (candidatePassword) {
+  if (this.mqttPasswordHash) {
+    return bcrypt.compare(candidatePassword, this.mqttPasswordHash);
+  }
+  // Fallback for devices registered before bcrypt migration
+  return this.mqttPassword === candidatePassword;
 };
 
 allowedDeviceSchema.statics.registerDevice = async function (deviceData) {
@@ -118,6 +130,7 @@ allowedDeviceSchema.statics.registerDevice = async function (deviceData) {
   const hashedSecret = hashSecret(rawSecret);
   const mqttUsername = `dev_${deviceData.serialNumber.toUpperCase().trim()}`;
   const mqttPassword = crypto.randomBytes(24).toString('hex');
+  const mqttPasswordHash = await bcrypt.hash(mqttPassword, MQTT_BCRYPT_ROUNDS);
 
   const device = await this.create({
     ...deviceData,
@@ -125,6 +138,7 @@ allowedDeviceSchema.statics.registerDevice = async function (deviceData) {
     deviceSecret: hashedSecret,
     mqttUsername,
     mqttPassword,
+    mqttPasswordHash,
   });
 
   device._rawSecret = rawSecret;
@@ -134,19 +148,22 @@ allowedDeviceSchema.statics.registerDevice = async function (deviceData) {
 allowedDeviceSchema.statics.registerBatch = async function (devices) {
   const secretsMap = {};
 
-  const prepared = devices.map((d) => {
+  const prepared = await Promise.all(devices.map(async (d) => {
     const sn = d.serialNumber.toUpperCase().trim();
     const rawSecret = d.deviceSecret || crypto.randomBytes(16).toString('hex');
     secretsMap[sn] = rawSecret;
+    const mqttPassword = crypto.randomBytes(24).toString('hex');
+    const mqttPasswordHash = await bcrypt.hash(mqttPassword, MQTT_BCRYPT_ROUNDS);
 
     return {
       ...d,
       serialNumber: sn,
       deviceSecret: hashSecret(rawSecret),
       mqttUsername: `dev_${sn}`,
-      mqttPassword: crypto.randomBytes(24).toString('hex'),
+      mqttPassword,
+      mqttPasswordHash,
     };
-  });
+  }));
 
   const result = await this.insertMany(prepared, { ordered: false });
   result._secretsMap = secretsMap;

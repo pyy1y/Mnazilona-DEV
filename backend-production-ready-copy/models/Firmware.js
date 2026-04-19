@@ -21,9 +21,11 @@ const firmwareSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    // OTA file info (prep - actual file hosting later)
+    // OTA file info
+    filePath: { type: String, default: null },
     fileSize: { type: Number, default: null },
-    checksum: { type: String, default: null },
+    checksum: { type: String, default: null },       // SHA256 of firmware binary
+    signature: { type: String, default: null },      // RSA signature (base64) for OTA verification
     downloadUrl: { type: String, default: null },
     // Rollout
     isActive: { type: Boolean, default: true },

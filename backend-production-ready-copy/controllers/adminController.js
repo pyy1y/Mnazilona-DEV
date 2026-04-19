@@ -1,3 +1,6 @@
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const bcrypt = require('bcryptjs');
 const AllowedDevice = require('../models/AllowedDevice');
 const Device = require('../models/Device');
@@ -8,7 +11,7 @@ const Notification = require('../models/Notification');
 const Room = require('../models/Room');
 const { topicOf, publishMessage, isMqttHealthy } = require('../config/mqtt');
 const { isHealthy: isDbHealthy } = require('../config/database');
-const { generateToken } = require('../utils/helpers');
+const { generateToken, generateRefreshToken, REFRESH_TOKEN_EXPIRY_MS } = require('../utils/helpers');
 const { getStats: getRateLimitStats, getRecentEvents, getTopOffenders } = require('../config/rateLimitStore');
 const Firmware = require('../models/Firmware');
 const IPBlacklist = require('../models/IPBlacklist');
@@ -16,6 +19,7 @@ const AnomalyAlert = require('../models/AnomalyAlert');
 const { forceRefreshBlacklist } = require('../middleware/ipBlacklist');
 const { trackFailedLogin, trackAdminAction } = require('../services/anomalyDetector');
 const { sendVerificationCode, verifyCode } = require('../services/codeService');
+const { signFirmware, verifyFirmwareSignature } = require('../utils/firmwareSigner');
 
 const BCRYPT_ROUNDS = 12;
 
@@ -104,6 +108,8 @@ exports.loginVerifyCode = async (req, res) => {
     }
 
     user.lastLoginAt = new Date();
+    user.refreshToken = generateRefreshToken();
+    user.refreshTokenExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS);
     await user.save();
 
     const token = generateToken(user);
@@ -120,6 +126,7 @@ exports.loginVerifyCode = async (req, res) => {
     res.json({
       message: 'Admin login successful',
       token,
+      refreshToken: user.refreshToken,
       admin: {
         id: user._id,
         name: user.name,
@@ -1168,7 +1175,7 @@ exports.listFirmware = async (req, res) => {
 
 exports.createFirmware = async (req, res) => {
   try {
-    const { version, deviceType, changelog, isStable, fileSize, checksum, downloadUrl } = req.body;
+    const { version, deviceType, changelog, isStable } = req.body;
 
     if (!version || !deviceType) {
       return res.status(400).json({ message: 'Version and device type are required' });
@@ -1179,14 +1186,35 @@ exports.createFirmware = async (req, res) => {
       return res.status(409).json({ message: 'Firmware version already exists for this device type' });
     }
 
+    let filePath = null;
+    let fileSize = null;
+    let checksum = null;
+    let signature = null;
+
+    if (req.file) {
+      const fileBuffer = fs.readFileSync(req.file.path);
+
+      // Validate ESP32 firmware magic byte (0xE9) at offset 0
+      if (fileBuffer.length < 16 || fileBuffer[0] !== 0xE9) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ message: 'Invalid firmware binary - not a valid ESP32 firmware file' });
+      }
+
+      filePath = req.file.path;
+      fileSize = req.file.size;
+      checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+      signature = signFirmware(fileBuffer);
+    }
+
     const firmware = await Firmware.create({
       version,
       deviceType,
       changelog: changelog || '',
-      isStable: isStable || false,
-      fileSize: fileSize || null,
-      checksum: checksum || null,
-      downloadUrl: downloadUrl || null,
+      isStable: isStable === 'true' || isStable === true,
+      filePath,
+      fileSize,
+      checksum,
+      signature,
       publishedAt: new Date(),
       publishedBy: req.user.id,
     });
@@ -1202,17 +1230,34 @@ exports.createFirmware = async (req, res) => {
 exports.updateFirmware = async (req, res) => {
   try {
     const { firmwareId } = req.params;
-    const { changelog, isStable, isActive, downloadUrl, fileSize, checksum } = req.body;
+    const { changelog, isStable, isActive } = req.body;
 
     const firmware = await Firmware.findById(firmwareId);
     if (!firmware) return res.status(404).json({ message: 'Firmware not found' });
 
     if (changelog !== undefined) firmware.changelog = changelog;
-    if (isStable !== undefined) firmware.isStable = isStable;
-    if (isActive !== undefined) firmware.isActive = isActive;
-    if (downloadUrl !== undefined) firmware.downloadUrl = downloadUrl;
-    if (fileSize !== undefined) firmware.fileSize = fileSize;
-    if (checksum !== undefined) firmware.checksum = checksum;
+    if (isStable !== undefined) firmware.isStable = isStable === 'true' || isStable === true;
+    if (isActive !== undefined) firmware.isActive = isActive === 'true' || isActive === true;
+
+    // If a new firmware binary is uploaded, replace the old one
+    if (req.file) {
+      const fileBuffer = fs.readFileSync(req.file.path);
+
+      // Validate ESP32 firmware magic byte (0xE9) at offset 0
+      if (fileBuffer.length < 16 || fileBuffer[0] !== 0xE9) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ message: 'Invalid firmware binary - not a valid ESP32 firmware file' });
+      }
+
+      // Delete old file if exists
+      if (firmware.filePath && fs.existsSync(firmware.filePath)) {
+        fs.unlinkSync(firmware.filePath);
+      }
+      firmware.filePath = req.file.path;
+      firmware.fileSize = req.file.size;
+      firmware.checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+      firmware.signature = signFirmware(fileBuffer);
+    }
 
     await firmware.save();
 
@@ -1230,6 +1275,11 @@ exports.deleteFirmware = async (req, res) => {
     const firmware = await Firmware.findById(firmwareId);
     if (!firmware) return res.status(404).json({ message: 'Firmware not found' });
 
+    // Delete binary file if exists
+    if (firmware.filePath && fs.existsSync(firmware.filePath)) {
+      fs.unlinkSync(firmware.filePath);
+    }
+
     await Firmware.findByIdAndDelete(firmwareId);
 
     await audit(req, 'firmware_delete', `${firmware.deviceType}@${firmware.version}`);
@@ -1237,6 +1287,127 @@ exports.deleteFirmware = async (req, res) => {
   } catch (error) {
     console.error('Delete firmware error:', error.message);
     res.status(500).json({ message: 'Failed to delete firmware' });
+  }
+};
+
+// ============================================================
+// pushOtaUpdate - Push OTA to specific device or all devices of a type
+// ============================================================
+exports.pushOtaUpdate = async (req, res) => {
+  try {
+    const { firmwareId } = req.params;
+    const { serialNumber } = req.body; // optional - if omitted, push to all matching devices
+
+    const firmware = await Firmware.findById(firmwareId);
+    if (!firmware) return res.status(404).json({ message: 'Firmware not found' });
+    if (!firmware.filePath || !fs.existsSync(firmware.filePath)) {
+      return res.status(400).json({ message: 'No firmware binary uploaded for this version' });
+    }
+    if (!firmware.isActive) {
+      return res.status(400).json({ message: 'Firmware version is not active' });
+    }
+
+    // Build the download URL for devices
+    const serverBase = `${req.protocol}://${req.get('host')}`;
+    const downloadUrl = `${serverBase}/devices/ota/download/${firmware._id}`;
+
+    // Find target devices
+    let filter = { deviceType: firmware.deviceType, owner: { $ne: null } };
+    if (serialNumber) {
+      filter.serialNumber = serialNumber.trim().toUpperCase();
+    }
+
+    const devices = await Device.find(filter).select('serialNumber isOnline firmwareVersion');
+
+    if (devices.length === 0) {
+      return res.status(404).json({ message: 'No matching devices found' });
+    }
+
+    let notifiedCount = 0;
+    let skippedCount = 0;
+    let offlineCount = 0;
+
+    for (const device of devices) {
+      // Skip devices already on this version
+      if (device.firmwareVersion === firmware.version) {
+        skippedCount++;
+        continue;
+      }
+      if (!device.isOnline) {
+        offlineCount++;
+        continue;
+      }
+
+      // Send OTA command via MQTT
+      const topic = topicOf(device.serialNumber, 'command');
+      await publishMessage(topic, {
+        command: 'ota_update',
+        version: firmware.version,
+        url: downloadUrl,
+        checksum: firmware.checksum,
+        fileSize: firmware.fileSize,
+        ts: Date.now(),
+        source: 'admin',
+      });
+
+      // Update device OTA tracking
+      await Device.findOneAndUpdate(
+        { serialNumber: device.serialNumber },
+        {
+          otaStatus: 'notified',
+          otaTargetVersion: firmware.version,
+          otaProgress: 0,
+          otaError: null,
+          otaStartedAt: null,
+          otaCompletedAt: null,
+        }
+      );
+
+      await DeviceLog.create({
+        serialNumber: device.serialNumber,
+        type: 'info',
+        message: `OTA update to v${firmware.version} initiated by admin`,
+        source: 'server',
+      });
+
+      notifiedCount++;
+    }
+
+    await audit(req, 'ota_push', `${firmware.deviceType}@${firmware.version} -> ${notifiedCount} devices`);
+
+    res.json({
+      message: 'OTA update pushed',
+      version: firmware.version,
+      notified: notifiedCount,
+      skipped: skippedCount,
+      offline: offlineCount,
+      total: devices.length,
+    });
+  } catch (error) {
+    console.error('Push OTA error:', error.message);
+    res.status(500).json({ message: 'Failed to push OTA update' });
+  }
+};
+
+// ============================================================
+// getOtaStatus - Get OTA status for all devices or specific device
+// ============================================================
+exports.getOtaStatus = async (req, res) => {
+  try {
+    const { deviceType } = req.query;
+
+    const filter = { otaStatus: { $ne: 'idle' } };
+    if (deviceType) filter.deviceType = deviceType;
+
+    const devices = await Device.find(filter)
+      .select('serialNumber name deviceType firmwareVersion otaStatus otaTargetVersion otaProgress otaError otaStartedAt otaCompletedAt isOnline')
+      .sort({ otaStartedAt: -1 })
+      .lean();
+
+    res.json({ devices, count: devices.length });
+  } catch (error) {
+    console.error('Get OTA status error:', error.message);
+    res.status(500).json({ message: 'Failed to get OTA status' });
   }
 };
 

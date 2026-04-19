@@ -1,6 +1,6 @@
 // app/login.tsx
 
-import React, { useState, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
@@ -13,7 +13,7 @@ import {
   Platform,
   ScrollView,
 } from 'react-native';
-import { useRouter, Link } from 'expo-router';
+import { useRouter, Link, useNavigation } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
 
 import { api } from '../utils/api';
@@ -21,15 +21,31 @@ import { ENDPOINTS } from '../constants/api';
 import { isValidEmail, normalizeEmail } from '../utils/validation';
 
 const BRAND_COLOR = '#2E5B8E';
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_DURATION_MS = 60000; // 1 minute lockout
 
 export default function LoginScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
 
   // Form state
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isPasswordVisible, setIsPasswordVisible] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+
+  // Rate limiting state
+  const [failedAttempts, setFailedAttempts] = useState(0);
+  const [lockoutUntil, setLockoutUntil] = useState<number>(0);
+
+  // Clear password when leaving screen
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('blur', () => {
+      setPassword('');
+      setIsPasswordVisible(false);
+    });
+    return unsubscribe;
+  }, [navigation]);
 
   // Refs
   const passwordRef = useRef<TextInput>(null);
@@ -48,6 +64,14 @@ export default function LoginScreen() {
 
   const handleLogin = useCallback(async () => {
     if (isLoading) return;
+
+    // Check lockout
+    const now = Date.now();
+    if (lockoutUntil > now) {
+      const secondsLeft = Math.ceil((lockoutUntil - now) / 1000);
+      Alert.alert('Too Many Attempts', `Please wait ${secondsLeft} seconds before trying again.`);
+      return;
+    }
 
     // Validation
     if (!normalizedEmail) {
@@ -74,9 +98,22 @@ export default function LoginScreen() {
       });
 
       if (!response.success) {
-        Alert.alert('Login Failed', response.message || 'Invalid email or password.');
+        const newAttempts = failedAttempts + 1;
+        setFailedAttempts(newAttempts);
+
+        if (newAttempts >= MAX_FAILED_ATTEMPTS) {
+          setLockoutUntil(Date.now() + LOCKOUT_DURATION_MS);
+          setFailedAttempts(0);
+          Alert.alert('Account Locked', 'Too many failed attempts. Please wait 1 minute.');
+        } else {
+          Alert.alert('Login Failed', response.message || 'Invalid email or password.');
+        }
         return;
       }
+
+      // Reset on success
+      setFailedAttempts(0);
+      setLockoutUntil(0);
 
       // Navigate to OTP screen
       router.push({
@@ -92,7 +129,7 @@ export default function LoginScreen() {
     } finally {
       setIsLoading(false);
     }
-  }, [normalizedEmail, password, isLoading, router]);
+  }, [normalizedEmail, password, isLoading, router, failedAttempts, lockoutUntil]);
 
   const handleForgotPassword = useCallback(() => {
     router.push('/forgot-password');

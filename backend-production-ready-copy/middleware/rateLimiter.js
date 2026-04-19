@@ -1,4 +1,6 @@
 const rateLimit = require('express-rate-limit');
+const RedisStore = require('rate-limit-redis').default;
+const { getRedisClient } = require('../config/redis');
 const { recordRateLimitHit } = require('../config/rateLimitStore');
 const { emitToAdmins } = require('../config/socket');
 
@@ -7,10 +9,8 @@ const DEFAULT_WINDOW_MS = 15 * 60 * 1000;
 const createLimitHandler = (type) => (req, res) => {
   console.warn(`Rate limit exceeded [${type}]: ${req.ip}`);
 
-  // Track the hit
   recordRateLimitHit(type, req.ip, req.originalUrl);
 
-  // Notify admin dashboards in real-time
   emitToAdmins('ratelimit:hit', {
     type,
     ip: req.ip,
@@ -24,11 +24,28 @@ const createLimitHandler = (type) => (req, res) => {
   });
 };
 
+// Create Redis store if Redis is available, otherwise fall back to in-memory
+const createStore = (prefix) => {
+  try {
+    const client = getRedisClient();
+    if (client) {
+      return new RedisStore({
+        sendCommand: (...args) => client.call(...args),
+        prefix: `rl:${prefix}:`,
+      });
+    }
+  } catch (err) {
+    console.warn(`Redis store unavailable for ${prefix}, using in-memory: ${err.message}`);
+  }
+  return undefined; // express-rate-limit uses MemoryStore by default
+};
+
 const otpSendLimiter = rateLimit({
   windowMs: DEFAULT_WINDOW_MS,
   max: parseInt(process.env.OTP_SEND_LIMIT, 10) || 5,
   standardHeaders: true,
   legacyHeaders: false,
+  store: createStore('otp_send'),
   handler: createLimitHandler('otp_send'),
 });
 
@@ -37,6 +54,7 @@ const otpVerifyLimiter = rateLimit({
   max: parseInt(process.env.OTP_VERIFY_LIMIT, 10) || 10,
   standardHeaders: true,
   legacyHeaders: false,
+  store: createStore('otp_verify'),
   handler: createLimitHandler('otp_verify'),
 });
 
@@ -45,6 +63,7 @@ const apiLimiter = rateLimit({
   max: parseInt(process.env.API_RATE_LIMIT, 10) || 100,
   standardHeaders: true,
   legacyHeaders: false,
+  store: createStore('api'),
   handler: createLimitHandler('api'),
 });
 
@@ -53,6 +72,7 @@ const strictLimiter = rateLimit({
   max: parseInt(process.env.STRICT_RATE_LIMIT, 10) || 5,
   standardHeaders: true,
   legacyHeaders: false,
+  store: createStore('strict'),
   handler: createLimitHandler('strict'),
 });
 
@@ -61,6 +81,7 @@ const loginLimiter = rateLimit({
   max: parseInt(process.env.LOGIN_RATE_LIMIT, 10) || 10,
   standardHeaders: true,
   legacyHeaders: false,
+  store: createStore('login'),
   handler: createLimitHandler('login'),
 });
 
@@ -69,6 +90,7 @@ const deviceInquiryLimiter = rateLimit({
   max: parseInt(process.env.DEVICE_INQUIRY_LIMIT, 10) || 30,
   standardHeaders: true,
   legacyHeaders: false,
+  store: createStore('device_inquiry'),
   handler: createLimitHandler('device_inquiry'),
 });
 

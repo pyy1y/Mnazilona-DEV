@@ -1,7 +1,7 @@
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { sendVerificationCode, verifyCode } = require('../services/codeService');
-const { normalizeEmail, strongPassword, sanitizeString, generateToken, sanitizeUserResponse } = require('../utils/helpers');
+const { normalizeEmail, strongPassword, sanitizeString, generateToken, generateRefreshToken, sanitizeUserResponse, REFRESH_TOKEN_EXPIRY_MS } = require('../utils/helpers');
 const { trackFailedLogin, trackFailedOtp } = require('../services/anomalyDetector');
 
 const BCRYPT_ROUNDS = 12;
@@ -38,7 +38,7 @@ exports.registerVerifyCode = async (req, res) => {
 
     if (!strongPassword(password)) {
       return res.status(400).json({
-        message: 'Password must be at least 8 characters with 1 uppercase letter and 1 number',
+        message: 'Password must be 8-128 characters with uppercase, lowercase, number, and special character',
       });
     }
 
@@ -119,10 +119,12 @@ exports.loginVerifyCode = async (req, res) => {
     }
 
     user.lastLoginAt = new Date();
+    user.refreshToken = generateRefreshToken();
+    user.refreshTokenExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS);
     await user.save();
 
     const token = generateToken(user);
-    res.json({ message: 'Login successful', token, user: sanitizeUserResponse(user) });
+    res.json({ message: 'Login successful', token, refreshToken: user.refreshToken, user: sanitizeUserResponse(user) });
   } catch (error) {
     console.error('Login verify code error:', error.message);
     res.status(500).json({ message: 'Login failed' });
@@ -160,7 +162,7 @@ exports.resetPassword = async (req, res) => {
 
     if (!strongPassword(newPassword)) {
       return res.status(400).json({
-        message: 'Password must be at least 8 characters with 1 uppercase letter and 1 number',
+        message: 'Password must be 8-128 characters with uppercase, lowercase, number, and special character',
       });
     }
 
@@ -190,7 +192,7 @@ exports.changePassword = async (req, res) => {
 
     if (!strongPassword(newPassword)) {
       return res.status(400).json({
-        message: 'Password must be at least 8 characters with 1 uppercase letter and 1 number',
+        message: 'Password must be 8-128 characters with uppercase, lowercase, number, and special character',
       });
     }
 
@@ -207,12 +209,68 @@ exports.changePassword = async (req, res) => {
 
     user.password = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     user.tokenVersion = (user.tokenVersion || 0) + 1;
+    user.refreshToken = generateRefreshToken();
+    user.refreshTokenExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS);
     await user.save();
 
     const newToken = generateToken(user);
-    res.json({ message: 'Password changed successfully', token: newToken });
+    res.json({ message: 'Password changed successfully', token: newToken, refreshToken: user.refreshToken });
   } catch (error) {
     console.error('Change password error:', error.message);
     res.status(500).json({ message: 'Failed to change password' });
+  }
+};
+
+// ==================== LOGOUT ====================
+exports.logout = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Increment tokenVersion to invalidate all existing tokens
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    user.refreshToken = null;
+    user.refreshTokenExpiresAt = null;
+    await user.save();
+
+    res.json({ message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('Logout error:', error.message);
+    res.status(500).json({ message: 'Failed to logout' });
+  }
+};
+
+// ==================== REFRESH TOKEN ====================
+exports.refreshToken = async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(400).json({ message: 'Refresh token is required' });
+    }
+
+    const user = await User.findOne({
+      refreshToken,
+      refreshTokenExpiresAt: { $gt: new Date() },
+    }).select('+refreshToken +refreshTokenExpiresAt');
+
+    if (!user) {
+      return res.status(401).json({ message: 'Invalid or expired refresh token', code: 'REFRESH_EXPIRED' });
+    }
+
+    if (!user.isActive) {
+      return res.status(403).json({ message: 'Account is deactivated' });
+    }
+
+    // Rotate refresh token (one-time use)
+    user.refreshToken = generateRefreshToken();
+    user.refreshTokenExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS);
+    await user.save();
+
+    const token = generateToken(user);
+    res.json({ token, refreshToken: user.refreshToken });
+  } catch (error) {
+    console.error('Refresh token error:', error.message);
+    res.status(500).json({ message: 'Failed to refresh token' });
   }
 };

@@ -1,9 +1,12 @@
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const Device = require('../models/Device');
 const AllowedDevice = require('../models/AllowedDevice');
 const DeviceLog = require('../models/DeviceLog');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
+const Firmware = require('../models/Firmware');
 const { topicOf, publishMessage, MQTT_BROKER_HOST } = require('../config/mqtt');
 const { canUserAccessDevice, getDeviceACL } = require('../services/mqttAclService');
 const { trackDeviceCommand, trackPairAttempt } = require('../services/anomalyDetector');
@@ -614,5 +617,111 @@ exports.getAllLogs = async (req, res) => {
   } catch (error) {
     console.error('Get all logs error:', error.message);
     res.status(500).json({ message: 'Failed to fetch logs' });
+  }
+};
+
+// ============================================================
+// OTA: Download firmware binary (called by ESP32 device)
+// Authenticates via device serial + secret in headers
+// ============================================================
+exports.otaDownload = async (req, res) => {
+  try {
+    const { firmwareId } = req.params;
+    const deviceSerial = (req.headers['x-device-serial'] || '').trim().toUpperCase();
+    const deviceSecret = req.headers['x-device-secret'] || '';
+
+    if (!deviceSerial || !deviceSecret) {
+      return res.status(401).json({ message: 'Device authentication required' });
+    }
+
+    // Verify device identity
+    const allowedDevice = await AllowedDevice.findAllowedWithSecret(deviceSerial);
+    if (!allowedDevice || !allowedDevice.verifySecret(deviceSecret)) {
+      return res.status(403).json({ message: 'Device not authorized' });
+    }
+
+    const firmware = await Firmware.findById(firmwareId);
+    if (!firmware) {
+      return res.status(404).json({ message: 'Firmware not found' });
+    }
+    if (!firmware.filePath || !fs.existsSync(firmware.filePath)) {
+      return res.status(404).json({ message: 'Firmware binary not available' });
+    }
+
+    // Log the download
+    await DeviceLog.create({
+      serialNumber: deviceSerial,
+      type: 'info',
+      message: `OTA downloading firmware v${firmware.version}`,
+      source: 'device',
+    });
+
+    // Send binary with metadata headers
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', firmware.fileSize);
+    res.setHeader('X-Firmware-Version', firmware.version);
+    res.setHeader('X-Firmware-Checksum', firmware.checksum);
+    res.setHeader('X-Firmware-Size', firmware.fileSize);
+    if (firmware.signature) {
+      res.setHeader('X-Firmware-Signature', firmware.signature);
+    }
+
+    const fileStream = fs.createReadStream(firmware.filePath);
+    fileStream.pipe(res);
+  } catch (error) {
+    console.error('OTA download error:', error.message);
+    res.status(500).json({ message: 'Failed to serve firmware' });
+  }
+};
+
+// ============================================================
+// OTA: Check for updates (called by ESP32 device on boot)
+// ============================================================
+exports.otaCheck = async (req, res) => {
+  try {
+    const deviceSerial = (req.headers['x-device-serial'] || '').trim().toUpperCase();
+    const deviceSecret = req.headers['x-device-secret'] || '';
+    const currentVersion = req.headers['x-firmware-version'] || '';
+
+    if (!deviceSerial || !deviceSecret) {
+      return res.status(401).json({ message: 'Device authentication required' });
+    }
+
+    const allowedDevice = await AllowedDevice.findAllowedWithSecret(deviceSerial);
+    if (!allowedDevice || !allowedDevice.verifySecret(deviceSecret)) {
+      return res.status(403).json({ message: 'Device not authorized' });
+    }
+
+    const device = await Device.findOne({ serialNumber: deviceSerial });
+    if (!device) {
+      return res.status(404).json({ message: 'Device not found' });
+    }
+
+    // Find latest stable firmware for this device type
+    const latestFirmware = await Firmware.findOne({
+      deviceType: device.deviceType,
+      isStable: true,
+      isActive: true,
+      filePath: { $ne: null },
+    }).sort({ createdAt: -1 });
+
+    if (!latestFirmware || latestFirmware.version === currentVersion) {
+      return res.json({ updateAvailable: false });
+    }
+
+    const serverBase = `${req.protocol}://${req.get('host')}`;
+
+    res.json({
+      updateAvailable: true,
+      version: latestFirmware.version,
+      changelog: latestFirmware.changelog,
+      checksum: latestFirmware.checksum,
+      signature: latestFirmware.signature || null,
+      fileSize: latestFirmware.fileSize,
+      url: `${serverBase}/devices/ota/download/${latestFirmware._id}`,
+    });
+  } catch (error) {
+    console.error('OTA check error:', error.message);
+    res.status(500).json({ message: 'Failed to check for updates' });
   }
 };

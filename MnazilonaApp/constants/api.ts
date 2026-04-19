@@ -2,8 +2,8 @@
 // ======================================
 // API Configuration
 // ======================================
-const DEV_API_URL = 'http://192.168.8.143:3000';
-//const PROD_API_URL = 'https://91.98.207.169';
+const DEV_API_URL = 'http://172.20.10.2:3000';
+const PROD_API_URL = 'https://91.98.207.169';
 const isDev = __DEV__;
 
 export const API_URL = isDev ? DEV_API_URL : PROD_API_URL;
@@ -21,6 +21,7 @@ export const ENDPOINTS = {
     FORGOT_PASSWORD: '/auth/password/forgot',
     RESET_PASSWORD: '/auth/password/reset',
     CHANGE_PASSWORD: '/auth/password/change',
+    LOGOUT: '/auth/logout',
   },
 
   // User / Profile
@@ -89,8 +90,8 @@ export const APP_CONFIG = {
 // ======================================
 export const VALIDATION = {
   PASSWORD_MIN_LENGTH: 8,
-  PASSWORD_REGEX: /^(?=.*[A-Z])(?=.*\d).{8,}$/,
-  EMAIL_REGEX: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+  PASSWORD_REGEX: /^(?=.*[A-Z])(?=.*[a-z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{}|;:'",.<>?/\\`~]).{8,}$/,
+  EMAIL_REGEX: /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/,
   NAME_MIN_LENGTH: 2,
   NAME_MAX_LENGTH: 100,
 } as const;

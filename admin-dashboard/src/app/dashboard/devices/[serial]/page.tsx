@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   getDeviceDetail,
@@ -10,6 +10,9 @@ import {
   unpairDevice,
   factoryResetDevice,
 } from '@/lib/api';
+import { useToast } from '@/components/Toast';
+import { getErrorMessage } from '@/lib/types';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import { useSocket } from '@/lib/socket';
 import StatusBadge from '@/components/StatusBadge';
 import {
@@ -51,9 +54,13 @@ interface LatestFirmware {
   deviceType: string;
 }
 
+// Debounce guard for commands (prevent rapid clicks)
+const COMMAND_COOLDOWN = 2000;
+
 export default function DeviceDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const toast = useToast();
   const serial = (params.serial as string)?.toUpperCase();
 
   const [device, setDevice] = useState<DeviceDetail | null>(null);
@@ -67,6 +74,12 @@ export default function DeviceDetailPage() {
   const [command, setCommand] = useState('');
   const { connected, on } = useSocket();
 
+  // Command cooldown to prevent rapid-fire
+  const lastCommandTime = useRef(0);
+
+  // Confirm dialog state
+  const [confirmDialog, setConfirmDialog] = useState<'unpair' | 'factory-reset' | null>(null);
+
   const fetchDetail = useCallback(async () => {
     try {
       const res = await getDeviceDetail(serial);
@@ -74,11 +87,11 @@ export default function DeviceDetailPage() {
       setLogs(res.data.logs || []);
       setLatestFirmware(res.data.latestFirmware);
     } catch (err) {
-      console.error(err);
+      toast.error(getErrorMessage(err, 'Failed to load device'));
     } finally {
       setLoading(false);
     }
-  }, [serial]);
+  }, [serial, toast]);
 
   useEffect(() => { fetchDetail(); }, [fetchDetail]);
 
@@ -94,14 +107,24 @@ export default function DeviceDetailPage() {
   }, [on, serial]);
 
   const handleCommand = async (cmd: string) => {
-    if (!confirm(`Send "${cmd}" command to ${device?.name}?`)) return;
+    // Command cooldown
+    const now = Date.now();
+    if (now - lastCommandTime.current < COMMAND_COOLDOWN) {
+      toast.warning('Please wait before sending another command');
+      return;
+    }
+    lastCommandTime.current = now;
+
     setActionLoading(true);
     try {
       await sendDeviceCommand(serial, cmd);
-      alert(`Command "${cmd}" sent`);
+      toast.success(`Command "${cmd}" sent`);
       fetchDetail();
-    } catch { alert('Failed to send command'); }
-    finally { setActionLoading(false); }
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to send command'));
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   const handleCustomCommand = async () => {
@@ -109,53 +132,63 @@ export default function DeviceDetailPage() {
     setActionLoading(true);
     try {
       await sendDeviceCommand(serial, command.trim());
-      alert(`Command "${command}" sent`);
+      toast.success(`Command "${command}" sent`);
       setCommandModal(false);
       setCommand('');
       fetchDetail();
-    } catch { alert('Failed to send command'); }
-    finally { setActionLoading(false); }
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to send command'));
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   const handleLock = async () => {
     setActionLoading(true);
     try {
       await lockDevice(serial, lockReason || undefined);
+      toast.success('Device locked');
       setShowLockModal(false);
       setLockReason('');
       fetchDetail();
-    } catch { alert('Failed to lock device'); }
-    finally { setActionLoading(false); }
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to lock device'));
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   const handleUnlock = async () => {
-    if (!confirm('Unlock this device? User commands will be restored.')) return;
     setActionLoading(true);
     try {
       await unlockDevice(serial);
+      toast.success('Device unlocked');
       fetchDetail();
-    } catch { alert('Failed to unlock device'); }
-    finally { setActionLoading(false); }
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to unlock device'));
+    } finally {
+      setActionLoading(false);
+    }
   };
 
-  const handleUnpair = async () => {
-    if (!confirm('Unpair this device from its owner?')) return;
+  const handleConfirmAction = async () => {
+    if (!confirmDialog) return;
     setActionLoading(true);
     try {
-      await unpairDevice(serial);
+      if (confirmDialog === 'unpair') {
+        await unpairDevice(serial);
+        toast.success('Device unpaired');
+      } else {
+        await factoryResetDevice(serial);
+        toast.success('Factory reset initiated');
+      }
       fetchDetail();
-    } catch { alert('Failed to unpair'); }
-    finally { setActionLoading(false); }
-  };
-
-  const handleFactoryReset = async () => {
-    if (!confirm('Factory reset this device? All settings will be erased.')) return;
-    setActionLoading(true);
-    try {
-      await factoryResetDevice(serial);
-      fetchDetail();
-    } catch { alert('Factory reset failed'); }
-    finally { setActionLoading(false); }
+    } catch (err) {
+      toast.error(getErrorMessage(err, `Failed to ${confirmDialog} device`));
+    } finally {
+      setActionLoading(false);
+      setConfirmDialog(null);
+    }
   };
 
   if (loading) {
@@ -320,12 +353,12 @@ export default function DeviceDetailPage() {
           <p className="text-sm font-medium text-gray-500 mb-3">Danger Zone</p>
           <div className="flex gap-3">
             {device.owner && (
-              <button onClick={handleUnpair} disabled={actionLoading}
+              <button onClick={() => setConfirmDialog('unpair')} disabled={actionLoading}
                 className="flex items-center gap-2 px-4 py-2 rounded-lg border border-yellow-300 text-yellow-700 hover:bg-yellow-50 text-sm font-medium disabled:opacity-50">
                 <Unplug size={16} /> Unpair
               </button>
             )}
-            <button onClick={handleFactoryReset} disabled={actionLoading}
+            <button onClick={() => setConfirmDialog('factory-reset')} disabled={actionLoading}
               className="flex items-center gap-2 px-4 py-2 rounded-lg border border-red-300 text-red-700 hover:bg-red-50 text-sm font-medium disabled:opacity-50">
               <RotateCcw size={16} /> Factory Reset
             </button>
@@ -431,6 +464,23 @@ export default function DeviceDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Confirm Dialog for dangerous actions */}
+      {confirmDialog && (
+        <ConfirmDialog
+          open={!!confirmDialog}
+          title={confirmDialog === 'factory-reset' ? 'Factory Reset Device' : 'Unpair Device'}
+          message={confirmDialog === 'factory-reset'
+            ? `This will erase ALL settings on "${device.name}". This action cannot be undone.`
+            : `Unpair "${device.name}" from its owner? The user will lose access.`}
+          variant={confirmDialog === 'factory-reset' ? 'danger' : 'warning'}
+          confirmLabel={confirmDialog === 'factory-reset' ? 'Factory Reset' : 'Unpair'}
+          typeToConfirm={confirmDialog === 'factory-reset' ? device.serialNumber : undefined}
+          onConfirm={handleConfirmAction}
+          onCancel={() => setConfirmDialog(null)}
+          loading={actionLoading}
+        />
       )}
     </div>
   );

@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { getRateLimits } from '@/lib/api';
+import { useToast } from '@/components/Toast';
+import { getErrorMessage } from '@/lib/types';
 import { useSocket } from '@/lib/socket';
 import { ShieldBan, Zap, RefreshCw } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
@@ -47,6 +49,7 @@ const typeColors: Record<string, string> = {
 };
 
 export default function RateLimitsPage() {
+  const toast = useToast();
   const [data, setData] = useState<RateLimitData | null>(null);
   const [loading, setLoading] = useState(true);
   const [liveHits, setLiveHits] = useState<RateLimitEvent[]>([]);
@@ -57,9 +60,9 @@ export default function RateLimitsPage() {
     try {
       const res = await getRateLimits();
       setData(res.data);
-    } catch (err) { console.error(err); }
+    } catch (err) { toast.error(getErrorMessage(err, 'Failed to load rate limits')); }
     finally { setLoading(false); }
-  }, []);
+  }, [toast]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 

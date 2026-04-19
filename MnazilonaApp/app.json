@@ -22,7 +22,13 @@
           "_http._tcp"
         ],
         "NSAppTransportSecurity": {
-          "NSAllowsArbitraryLoads": true
+          "NSAllowsArbitraryLoads": false,
+          "NSExceptionDomains": {
+            "192.168.4.1": {
+              "NSExceptionAllowsInsecureHTTPLoads": true,
+              "NSIncludesSubdomains": false
+            }
+          }
         }
       },
       "entitlements": {
@@ -49,8 +55,7 @@
         "android.permission.CHANGE_WIFI_STATE",
         "android.permission.CHANGE_NETWORK_STATE"
       ],
-      "package": "com.mnazilona.MnazilonaApp",
-      "usesCleartextTraffic": true
+      "package": "com.mnazilona.MnazilonaApp"
     },
     "web": {
       "output": "static",
@@ -71,7 +76,8 @@
         }
       ],
       "react-native-wifi-reborn",
-      "expo-secure-store"
+      "expo-secure-store",
+      "./plugins/withNetworkSecurityConfig"
     ],
     "experiments": {
       "typedRoutes": true,

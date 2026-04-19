@@ -68,7 +68,7 @@ export default function OnboardingScreen() {
       await AsyncStorage.setItem(ONBOARDING_KEY, 'true');
       router.replace('/login');
     } catch (error) {
-      console.error('Failed to save onboarding state:', error);
+      if (__DEV__) console.error('Failed to save onboarding state:', error);
       router.replace('/login');
     }
   }, [router]);

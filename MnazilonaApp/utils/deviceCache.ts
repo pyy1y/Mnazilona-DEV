@@ -1,5 +1,7 @@
 // utils/deviceCache.ts
 // Offline-first device caching using AsyncStorage
+// NOTE: Only non-sensitive display data is cached here.
+// Sensitive fields (macAddress) are stripped before storage.
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -29,8 +31,10 @@ export type CachedRoom = {
 export const DeviceCache = {
   async saveDevices(devices: CachedDevice[]): Promise<void> {
     try {
+      // Strip sensitive fields before caching
+      const sanitized = devices.map(({ macAddress, ...rest }) => rest);
       const payload = JSON.stringify({
-        devices,
+        devices: sanitized,
         cachedAt: Date.now(),
       });
       await AsyncStorage.setItem(DEVICES_CACHE_KEY, payload);

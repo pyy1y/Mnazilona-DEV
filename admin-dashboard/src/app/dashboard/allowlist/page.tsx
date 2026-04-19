@@ -2,9 +2,12 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { getAllowedDevices, registerDevice, banDevice, unbanDevice } from '@/lib/api';
+import { useToast } from '@/components/Toast';
+import { getErrorMessage } from '@/lib/types';
+import { useDebounce } from '@/lib/hooks';
 import DataTable from '@/components/DataTable';
 import StatusBadge from '@/components/StatusBadge';
-import { Search, Plus, ShieldBan, ShieldCheck, Copy } from 'lucide-react';
+import { Search, Plus, ShieldBan, ShieldCheck, Copy, Eye, EyeOff } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 
 interface AllowedDeviceItem {
@@ -24,28 +27,34 @@ interface AllowedDeviceItem {
 const DEVICE_TYPES = ['relay', 'light', 'dimmer', 'ac', 'lock', 'water-tank', 'security'];
 
 export default function AllowlistPage() {
+  const toast = useToast();
   const [devices, setDevices] = useState<AllowedDeviceItem[]>([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 300);
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(true);
   const [showRegister, setShowRegister] = useState(false);
   const [registerForm, setRegisterForm] = useState({ serialNumber: '', deviceType: 'relay', firmwareVersion: '1.0.0' });
   const [registerResult, setRegisterResult] = useState<{ deviceSecret: string; mqttUsername: string; mqttPassword: string } | null>(null);
   const [registerLoading, setRegisterLoading] = useState(false);
+  const [showSecrets, setShowSecrets] = useState(false);
+
+  const [banReason, setBanReason] = useState('');
+  const [showBanModal, setShowBanModal] = useState<string | null>(null);
 
   const fetchDevices = useCallback(async (page = 1) => {
     setLoading(true);
     try {
       const params: Record<string, string | number> = { page, limit: 20 };
-      if (search) params.search = search;
+      if (debouncedSearch) params.search = debouncedSearch;
       if (status) params.status = status;
       const res = await getAllowedDevices(params);
       setDevices(res.data.devices);
       setPagination(res.data.pagination);
-    } catch (err) { console.error(err); }
+    } catch (err) { toast.error(getErrorMessage(err, 'Failed to load devices')); }
     finally { setLoading(false); }
-  }, [search, status]);
+  }, [debouncedSearch, status, toast]);
 
   useEffect(() => { fetchDevices(); }, [fetchDevices]);
 
@@ -55,32 +64,41 @@ export default function AllowlistPage() {
     try {
       const res = await registerDevice(registerForm);
       setRegisterResult(res.data.device);
+      setShowSecrets(false);
+      toast.success('Device registered successfully');
       fetchDevices();
     } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { message?: string } } };
-      alert(axiosErr.response?.data?.message || 'Failed to register device');
+      toast.error(getErrorMessage(err, 'Failed to register device'));
     } finally { setRegisterLoading(false); }
   };
 
-  const handleBan = async (serial: string) => {
-    const reason = prompt('Ban reason (optional):');
-    if (reason === null) return;
+  const handleBan = async () => {
+    if (!showBanModal) return;
     try {
-      await banDevice(serial, reason || undefined);
+      await banDevice(showBanModal, banReason || undefined);
+      toast.success(`Device ${showBanModal} banned`);
+      setShowBanModal(null);
+      setBanReason('');
       fetchDevices(pagination.page);
-    } catch { alert('Failed to ban device'); }
+    } catch (err) { toast.error(getErrorMessage(err, 'Failed to ban device')); }
   };
 
   const handleUnban = async (serial: string) => {
-    if (!confirm(`Unban ${serial}?`)) return;
     try {
       await unbanDevice(serial);
+      toast.success(`Device ${serial} unbanned`);
       fetchDevices(pagination.page);
-    } catch { alert('Failed to unban device'); }
+    } catch (err) { toast.error(getErrorMessage(err, 'Failed to unban device')); }
   };
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
+    toast.info('Copied to clipboard');
+  };
+
+  const maskValue = (value: string) => {
+    if (value.length <= 4) return '••••••••';
+    return value.slice(0, 4) + '••••••••';
   };
 
   const columns = [
@@ -118,7 +136,7 @@ export default function AllowlistPage() {
               <ShieldCheck size={16} />
             </button>
           ) : (
-            <button onClick={(e) => { e.stopPropagation(); handleBan(d.serialNumber); }}
+            <button onClick={(e) => { e.stopPropagation(); setShowBanModal(d.serialNumber); setBanReason(''); }}
               className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg" title="Ban">
               <ShieldBan size={16} />
             </button>
@@ -206,11 +224,22 @@ export default function AllowlistPage() {
                 <h3 className="text-lg font-semibold mb-2 text-green-700">Device Registered Successfully!</h3>
                 <p className="text-sm text-red-600 mb-4">Save these credentials now — they won&apos;t be shown again</p>
                 <div className="space-y-3 bg-gray-50 p-4 rounded-lg">
+                  <div className="flex items-center justify-end mb-2">
+                    <button
+                      onClick={() => setShowSecrets(!showSecrets)}
+                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-600"
+                    >
+                      {showSecrets ? <EyeOff size={14} /> : <Eye size={14} />}
+                      {showSecrets ? 'Hide' : 'Show'} credentials
+                    </button>
+                  </div>
                   {Object.entries(registerResult).map(([key, value]) => (
                     <div key={key} className="flex items-center justify-between">
                       <div>
                         <span className="text-xs text-gray-500">{key}</span>
-                        <p className="font-mono text-sm break-all">{value}</p>
+                        <p className="font-mono text-sm break-all">
+                          {showSecrets ? value : maskValue(value)}
+                        </p>
                       </div>
                       <button onClick={() => copyToClipboard(value)} className="p-1.5 text-gray-400 hover:text-blue-600">
                         <Copy size={16} />
@@ -222,6 +251,25 @@ export default function AllowlistPage() {
                   className="w-full mt-4 bg-gray-100 text-gray-700 py-2.5 rounded-lg font-medium hover:bg-gray-200">Close</button>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Ban Modal with reason */}
+      {showBanModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-md mx-4">
+            <h3 className="text-lg font-semibold mb-2">Ban Device</h3>
+            <p className="text-sm text-gray-500 mb-4">Ban device <span className="font-mono font-medium">{showBanModal}</span> from the system.</p>
+            <input type="text" placeholder="Reason (optional)"
+              value={banReason} onChange={(e) => setBanReason(e.target.value)}
+              className="w-full px-4 py-2.5 border border-gray-300 rounded-lg mb-4 outline-none focus:ring-2 focus:ring-red-500" />
+            <div className="flex gap-3">
+              <button onClick={handleBan}
+                className="flex-1 bg-red-600 text-white py-2.5 rounded-lg font-medium hover:bg-red-700">Ban Device</button>
+              <button onClick={() => { setShowBanModal(null); setBanReason(''); }}
+                className="flex-1 bg-gray-100 text-gray-700 py-2.5 rounded-lg font-medium hover:bg-gray-200">Cancel</button>
+            </div>
           </div>
         </div>
       )}

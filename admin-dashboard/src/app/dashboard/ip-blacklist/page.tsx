@@ -2,6 +2,10 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { getBlacklist, blockIP, unblockIP, deleteBlacklistEntry } from '@/lib/api';
+import { useToast } from '@/components/Toast';
+import { getErrorMessage } from '@/lib/types';
+import { useDebounce } from '@/lib/hooks';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import DataTable from '@/components/DataTable';
 import StatusBadge from '@/components/StatusBadge';
 import { Search, Plus, Trash2, ShieldOff } from 'lucide-react';
@@ -33,60 +37,68 @@ const sourceColors: Record<string, string> = {
 };
 
 export default function IPBlacklistPage() {
+  const toast = useToast();
   const [entries, setEntries] = useState<BlacklistEntry[]>([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 300);
   const [sourceFilter, setSourceFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({ ip: '', reason: '', duration: '' });
+  const [deleteEntry, setDeleteEntry] = useState<{ id: string; ip: string } | null>(null);
 
   const fetchEntries = useCallback(async (page = 1) => {
     setLoading(true);
     try {
       const params: Record<string, string | number> = { page, limit: 50, active: 'true' };
-      if (search) params.search = search;
+      if (debouncedSearch) params.search = debouncedSearch;
       if (sourceFilter) params.source = sourceFilter;
       const res = await getBlacklist(params);
       setEntries(res.data.entries);
       setPagination(res.data.pagination);
-    } catch (err) { console.error(err); }
+    } catch (err) { toast.error(getErrorMessage(err, 'Failed to load blacklist')); }
     finally { setLoading(false); }
-  }, [search, sourceFilter]);
+  }, [debouncedSearch, sourceFilter, toast]);
 
   useEffect(() => { fetchEntries(); }, [fetchEntries]);
 
   const handleBlock = async () => {
-    if (!formData.ip.trim() || !formData.reason.trim()) return;
+    if (!formData.ip.trim() || !formData.reason.trim()) {
+      toast.warning('IP address and reason are required');
+      return;
+    }
     try {
       await blockIP({
         ip: formData.ip.trim(),
         reason: formData.reason.trim(),
         duration: formData.duration ? parseInt(formData.duration) : undefined,
       });
+      toast.success(`IP ${formData.ip} blocked`);
       setShowModal(false);
       setFormData({ ip: '', reason: '', duration: '' });
       fetchEntries(pagination.page);
     } catch (err: unknown) {
-      const error = err as { response?: { data?: { message?: string } } };
-      alert(error.response?.data?.message || 'Failed to block IP');
+      toast.error(getErrorMessage(err, 'Failed to block IP'));
     }
   };
 
   const handleUnblock = async (ip: string) => {
-    if (!confirm(`Unblock IP ${ip}?`)) return;
     try {
       await unblockIP(ip);
+      toast.success(`IP ${ip} unblocked`);
       fetchEntries(pagination.page);
-    } catch { alert('Failed to unblock IP'); }
+    } catch (err) { toast.error(getErrorMessage(err, 'Failed to unblock IP')); }
   };
 
-  const handleDelete = async (id: string, ip: string) => {
-    if (!confirm(`Delete blacklist entry for ${ip}? This is permanent.`)) return;
+  const handleDelete = async () => {
+    if (!deleteEntry) return;
     try {
-      await deleteBlacklistEntry(id);
+      await deleteBlacklistEntry(deleteEntry.id);
+      toast.success(`Blacklist entry for ${deleteEntry.ip} deleted`);
+      setDeleteEntry(null);
       fetchEntries(pagination.page);
-    } catch { alert('Failed to delete entry'); }
+    } catch (err) { toast.error(getErrorMessage(err, 'Failed to delete entry')); }
   };
 
   const columns = [
@@ -144,7 +156,7 @@ export default function IPBlacklistPage() {
               <ShieldOff size={16} />
             </button>
           )}
-          <button onClick={() => handleDelete(e._id, e.ip)}
+          <button onClick={() => setDeleteEntry({ id: e._id, ip: e.ip })}
             className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg" title="Delete">
             <Trash2 size={16} />
           </button>
@@ -218,6 +230,19 @@ export default function IPBlacklistPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Delete Confirm */}
+      {deleteEntry && (
+        <ConfirmDialog
+          open={!!deleteEntry}
+          title="Delete Blacklist Entry"
+          message={`Permanently delete the blacklist entry for ${deleteEntry.ip}?`}
+          variant="danger"
+          confirmLabel="Delete"
+          onConfirm={handleDelete}
+          onCancel={() => setDeleteEntry(null)}
+        />
       )}
     </div>
   );

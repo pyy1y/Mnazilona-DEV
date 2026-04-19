@@ -2,10 +2,13 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '@/lib/auth';
+import { useToast } from '@/components/Toast';
+import { getErrorMessage } from '@/lib/types';
 import { Lock, Mail, ShieldCheck, ArrowLeft } from 'lucide-react';
 
 export default function LoginPage() {
   const { sendCode, verifyCode } = useAuth();
+  const toast = useToast();
   const [step, setStep] = useState<'credentials' | 'otp'>('credentials');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -39,8 +42,7 @@ export default function LoginPage() {
       setStep('otp');
       setResendTimer(60);
     } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { message?: string } } };
-      setError(axiosErr.response?.data?.message || 'Login failed');
+      setError(getErrorMessage(err, 'Login failed'));
     } finally {
       setLoading(false);
     }
@@ -52,9 +54,9 @@ export default function LoginPage() {
 
     try {
       await verifyCode(email, code);
+      toast.success('Login successful');
     } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { message?: string } } };
-      setError(axiosErr.response?.data?.message || 'Verification failed');
+      setError(getErrorMessage(err, 'Verification failed'));
       setOtp(['', '', '', '', '', '']);
       inputRefs.current[0]?.focus();
     } finally {
@@ -72,9 +74,9 @@ export default function LoginPage() {
       setResendTimer(60);
       setOtp(['', '', '', '', '', '']);
       inputRefs.current[0]?.focus();
+      toast.info('Verification code resent');
     } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { message?: string } } };
-      setError(axiosErr.response?.data?.message || 'Failed to resend code');
+      setError(getErrorMessage(err, 'Failed to resend code'));
     } finally {
       setLoading(false);
     }
@@ -144,6 +146,7 @@ export default function LoginPage() {
                   className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
                   placeholder="admin@mnazilona.com"
                   required
+                  autoComplete="email"
                 />
               </div>
             </div>
@@ -159,6 +162,7 @@ export default function LoginPage() {
                   className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
                   placeholder="••••••••"
                   required
+                  autoComplete="current-password"
                 />
               </div>
             </div>
@@ -209,6 +213,7 @@ export default function LoginPage() {
                   onKeyDown={(e) => handleOtpKeyDown(i, e)}
                   className="w-12 h-14 text-center text-xl font-semibold border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
                   disabled={loading}
+                  autoComplete="one-time-code"
                 />
               ))}
             </div>

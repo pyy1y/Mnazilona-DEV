@@ -3,8 +3,16 @@
 // Handles: commands, status polling, logs — all without internet
 
 import Zeroconf from 'react-native-zeroconf';
+import { TokenManager } from './api';
 
 const LOCAL_TIMEOUT = 5000;
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const token = await TokenManager.get();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
 
 export type LocalDevice = {
   serialNumber: string;
@@ -72,7 +80,7 @@ export function startLocalDiscovery(): void {
 
       if (device.ip) {
         discoveredDevices.set(device.serialNumber, device);
-        console.log(`[LocalDiscovery] Found: ${device.serialNumber} at ${device.ip}:${device.port}`);
+        if (__DEV__) console.log(`[LocalDiscovery] Found: ${device.serialNumber} at ${device.ip}:${device.port}`);
       }
     });
 
@@ -80,22 +88,22 @@ export function startLocalDiscovery(): void {
       const serial = service.txt?.serial || service.txt?.sn || '';
       if (serial) {
         discoveredDevices.delete(serial.toUpperCase());
-        console.log(`[LocalDiscovery] Removed: ${serial}`);
+        if (__DEV__) console.log(`[LocalDiscovery] Removed: ${serial}`);
       }
     });
 
     zeroconf.on('error', (err: any) => {
-      console.warn('[LocalDiscovery] Error:', err);
+      if (__DEV__) console.warn('[LocalDiscovery] Error:', err);
     });
 
     zeroconf.scan('mnazilona', 'tcp');
     isScanning = true;
-    console.log('[LocalDiscovery] Scanning started');
+    if (__DEV__) console.log('[LocalDiscovery] Scanning started');
 
     // Start polling local devices for status
     startStatusPolling();
   } catch (err) {
-    console.warn('[LocalDiscovery] Failed to start:', err);
+    if (__DEV__) console.warn('[LocalDiscovery] Failed to start:', err);
   }
 }
 
@@ -109,7 +117,7 @@ export function stopLocalDiscovery(): void {
     zeroconf.removeAllListeners();
     zeroconf = null;
     isScanning = false;
-    console.log('[LocalDiscovery] Scanning stopped');
+    if (__DEV__) console.log('[LocalDiscovery] Scanning stopped');
   } catch {
     // Non-fatal
   }
@@ -147,9 +155,10 @@ export async function sendLocalCommand(
   const timeoutId = setTimeout(() => controller.abort(), LOCAL_TIMEOUT);
 
   try {
+    const headers = await getAuthHeaders();
     const response = await fetch(`http://${device.ip}:${device.port}/command`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ command, params: params || {} }),
       signal: controller.signal,
     });
@@ -158,7 +167,7 @@ export async function sendLocalCommand(
     if (!response.ok) return { success: false };
 
     const data = await response.json().catch(() => null);
-    console.log(`[Local] Command "${command}" → ${serialNumber} OK`);
+    if (__DEV__) console.log(`[Local] Command "${command}" → ${serialNumber} OK`);
     return { success: true, data };
   } catch {
     clearTimeout(timeoutId);
@@ -181,8 +190,10 @@ export async function fetchLocalStatus(
   const timeoutId = setTimeout(() => controller.abort(), LOCAL_TIMEOUT);
 
   try {
+    const headers = await getAuthHeaders();
     const response = await fetch(`http://${device.ip}:${device.port}/status`, {
       method: 'GET',
+      headers,
       signal: controller.signal,
     });
 
@@ -213,8 +224,10 @@ export async function fetchLocalLogs(
   const timeoutId = setTimeout(() => controller.abort(), LOCAL_TIMEOUT);
 
   try {
+    const headers = await getAuthHeaders();
     const response = await fetch(`http://${device.ip}:${device.port}/logs`, {
       method: 'GET',
+      headers,
       signal: controller.signal,
     });
 

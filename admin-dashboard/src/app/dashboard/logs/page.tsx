@@ -2,6 +2,9 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { getLogs } from '@/lib/api';
+import { useToast } from '@/components/Toast';
+import { getErrorMessage } from '@/lib/types';
+import { useDebounce } from '@/lib/hooks';
 import DataTable from '@/components/DataTable';
 import { Search, Filter } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
@@ -22,9 +25,11 @@ const typeColors: Record<string, string> = {
 };
 
 export default function LogsPage() {
+  const toast = useToast();
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 300);
   const [type, setType] = useState('');
   const [source, setSource] = useState('');
   const [loading, setLoading] = useState(true);
@@ -33,15 +38,15 @@ export default function LogsPage() {
     setLoading(true);
     try {
       const params: Record<string, string | number> = { page, limit: 50 };
-      if (search) params.search = search;
+      if (debouncedSearch) params.search = debouncedSearch;
       if (type) params.type = type;
       if (source) params.source = source;
       const res = await getLogs(params);
       setLogs(res.data.logs);
       setPagination(res.data.pagination);
-    } catch (err) { console.error(err); }
+    } catch (err) { toast.error(getErrorMessage(err, 'Failed to load logs')); }
     finally { setLoading(false); }
-  }, [search, type, source]);
+  }, [debouncedSearch, type, source, toast]);
 
   useEffect(() => { fetchLogs(); }, [fetchLogs]);
 

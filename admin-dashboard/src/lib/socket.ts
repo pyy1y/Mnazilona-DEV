@@ -1,18 +1,27 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { io } from 'socket.io-client';
+import { io, Socket } from 'socket.io-client';
 import Cookies from 'js-cookie';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
 
-type SocketInstance = ReturnType<typeof io>;
+// Define event types for type safety
+interface ServerToClientEvents {
+  'device:status': (data: { serialNumber: string; isOnline: boolean; lastSeen: string; deviceType?: string; name?: string }) => void;
+  'service:status': (data: { mqtt?: string; database?: string }) => void;
+  'anomaly:alert': (data: unknown) => void;
+  'ota:progress': (data: unknown) => void;
+  'ratelimit:hit': (data: { type: string; ip: string; path: string; timestamp: string }) => void;
+}
+
+type TypedSocket = Socket<ServerToClientEvents>;
 
 // Singleton socket instance
-let socketInstance: SocketInstance | null = null;
+let socketInstance: TypedSocket | null = null;
 let refCount = 0;
 
-function getSocket(): SocketInstance {
+function getSocket(): TypedSocket {
   if (!socketInstance) {
     const token = Cookies.get('admin_token');
     socketInstance = io(`${API_BASE}/admin`, {
@@ -21,14 +30,28 @@ function getSocket(): SocketInstance {
       reconnection: true,
       reconnectionDelay: 2000,
       reconnectionAttempts: 10,
+    }) as TypedSocket;
+
+    // Refresh token on reconnect attempts (fixes stale token issue)
+    socketInstance.on('reconnect_attempt' as any, () => {
+      const freshToken = Cookies.get('admin_token');
+      if (socketInstance) {
+        (socketInstance as any).auth = { token: freshToken };
+      }
     });
 
-    (socketInstance as any).on('connect', () => {
-      console.log('Socket.IO connected');
+    socketInstance.on('connect', () => {
+      // Connected successfully
     });
 
-    (socketInstance as any).on('connect_error', (err: Error) => {
-      console.warn('Socket.IO error:', err.message);
+    socketInstance.on('connect_error', (err: Error) => {
+      // If auth error, try refreshing token
+      if (err.message.includes('auth') || err.message.includes('unauthorized')) {
+        const freshToken = Cookies.get('admin_token');
+        if (socketInstance && freshToken) {
+          (socketInstance as any).auth = { token: freshToken };
+        }
+      }
     });
   }
   return socketInstance;
@@ -44,7 +67,7 @@ function releaseSocket() {
 // Hook: connect to admin namespace and listen to events
 export function useSocket() {
   const [connected, setConnected] = useState(false);
-  const socketRef = useRef<SocketInstance | null>(null);
+  const socketRef = useRef<TypedSocket | null>(null);
 
   useEffect(() => {
     const socket = getSocket();
@@ -56,20 +79,23 @@ export function useSocket() {
     const onConnect = () => setConnected(true);
     const onDisconnect = () => setConnected(false);
 
-    (socket as any).on('connect', onConnect);
-    (socket as any).on('disconnect', onDisconnect);
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
 
     return () => {
-      (socket as any).off('connect', onConnect);
-      (socket as any).off('disconnect', onDisconnect);
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
       refCount--;
       releaseSocket();
     };
   }, []);
 
-  const on = useCallback((event: string, handler: (...args: any[]) => void) => {
-    (socketRef.current as any)?.on(event, handler);
-    return () => { (socketRef.current as any)?.off(event, handler); };
+  const on = useCallback(<E extends keyof ServerToClientEvents>(
+    event: E,
+    handler: ServerToClientEvents[E]
+  ) => {
+    socketRef.current?.on(event, handler as any);
+    return () => { socketRef.current?.off(event, handler as any); };
   }, []);
 
   return { connected, on, socket: socketRef.current };
@@ -80,7 +106,7 @@ export function useSocketEvent<T = unknown>(event: string, handler: (data: T) =>
   const { on, connected } = useSocket();
 
   useEffect(() => {
-    const cleanup = on(event, handler as (...args: any[]) => void);
+    const cleanup = on(event as any, handler as any);
     return cleanup;
   }, [event, handler, on]);
 

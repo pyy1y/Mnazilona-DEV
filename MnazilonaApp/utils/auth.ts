@@ -4,7 +4,8 @@
 import { saveUser, clearUser } from './userStorage';
 
 import { jwtDecode } from 'jwt-decode';
-import { TokenManager, UserDataManager } from './api';
+import { TokenManager, UserDataManager, api } from './api';
+import { ENDPOINTS } from '../constants/api';
 
 // ======================================
 // Types
@@ -143,9 +144,16 @@ export async function login(
 }
 
 export async function logout(): Promise<void> {
+  // Invalidate token server-side (best-effort, don't block on failure)
+  try {
+    await api.post(ENDPOINTS.AUTH.LOGOUT, {}, { requireAuth: true });
+  } catch {
+    // Non-fatal: local cleanup proceeds even if server call fails
+  }
+
   await UserDataManager.clear();
-  await TokenManager.remove(); // إذا عندك clear
-  await clearUser();           // ✅ يمسح الاسم من SecureStore
+  await TokenManager.remove();
+  await clearUser();
 }
 
 // ======================================

@@ -3,6 +3,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { getPairedDevices, sendDeviceCommand, unpairDevice, factoryResetDevice } from '@/lib/api';
+import { useToast } from '@/components/Toast';
+import { getErrorMessage } from '@/lib/types';
+import { useDebounce } from '@/lib/hooks';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import { useSocket } from '@/lib/socket';
 import DataTable from '@/components/DataTable';
 import StatusBadge from '@/components/StatusBadge';
@@ -33,9 +37,11 @@ const DEVICE_TYPES = ['relay', 'light', 'dimmer', 'ac', 'lock', 'water-tank', 's
 
 export default function DevicesPage() {
   const router = useRouter();
+  const toast = useToast();
   const [devices, setDevices] = useState<DeviceItem[]>([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 300);
   const [status, setStatus] = useState('');
   const [type, setType] = useState('');
   const [loading, setLoading] = useState(true);
@@ -43,19 +49,26 @@ export default function DevicesPage() {
   const [command, setCommand] = useState('');
   const { connected, on } = useSocket();
 
+  // Confirm dialog state
+  const [confirmDialog, setConfirmDialog] = useState<{
+    type: 'unpair' | 'factory-reset';
+    serial: string;
+    name: string;
+  } | null>(null);
+
   const fetchDevices = useCallback(async (page = 1) => {
     setLoading(true);
     try {
       const params: Record<string, string | number> = { page, limit: 20 };
-      if (search) params.search = search;
+      if (debouncedSearch) params.search = debouncedSearch;
       if (status) params.status = status;
       if (type) params.type = type;
       const res = await getPairedDevices(params);
       setDevices(res.data.devices);
       setPagination(res.data.pagination);
-    } catch (err) { console.error(err); }
+    } catch (err) { toast.error(getErrorMessage(err, 'Failed to load devices')); }
     finally { setLoading(false); }
-  }, [search, status, type]);
+  }, [debouncedSearch, status, type, toast]);
 
   useEffect(() => { fetchDevices(); }, [fetchDevices]);
 
@@ -76,30 +89,34 @@ export default function DevicesPage() {
     return off;
   }, [on, handleDeviceStatus]);
 
-  const handleUnpair = async (serial: string, name: string) => {
-    if (!confirm(`Unpair device "${name}" from its owner?`)) return;
+  const handleConfirmAction = async () => {
+    if (!confirmDialog) return;
     try {
-      await unpairDevice(serial);
+      if (confirmDialog.type === 'unpair') {
+        await unpairDevice(confirmDialog.serial);
+        toast.success(`Device "${confirmDialog.name}" unpaired`);
+      } else {
+        await factoryResetDevice(confirmDialog.serial);
+        toast.success(`Device "${confirmDialog.name}" factory reset initiated`);
+      }
       fetchDevices(pagination.page);
-    } catch { alert('Failed to unpair device'); }
-  };
-
-  const handleFactoryReset = async (serial: string, name: string) => {
-    if (!confirm(`Factory reset "${name}"? This will erase all its settings.`)) return;
-    try {
-      await factoryResetDevice(serial);
-      fetchDevices(pagination.page);
-    } catch { alert('Factory reset failed'); }
+    } catch (err) {
+      toast.error(getErrorMessage(err, `Failed to ${confirmDialog.type} device`));
+    } finally {
+      setConfirmDialog(null);
+    }
   };
 
   const handleSendCommand = async () => {
     if (!commandModal || !command.trim()) return;
     try {
       await sendDeviceCommand(commandModal.serial, command.trim());
-      alert('Command sent successfully');
+      toast.success(`Command "${command}" sent to ${commandModal.name}`);
       setCommandModal(null);
       setCommand('');
-    } catch { alert('Failed to send command'); }
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to send command'));
+    }
   };
 
   const columns = [
@@ -144,12 +161,12 @@ export default function DevicesPage() {
             <Terminal size={16} />
           </button>
           {d.owner && (
-            <button onClick={(e) => { e.stopPropagation(); handleUnpair(d.serialNumber, d.name); }}
+            <button onClick={(e) => { e.stopPropagation(); setConfirmDialog({ type: 'unpair', serial: d.serialNumber, name: d.name }); }}
               className="p-1.5 text-yellow-600 hover:bg-yellow-50 rounded-lg" title="Unpair">
               <Unplug size={16} />
             </button>
           )}
-          <button onClick={(e) => { e.stopPropagation(); handleFactoryReset(d.serialNumber, d.name); }}
+          <button onClick={(e) => { e.stopPropagation(); setConfirmDialog({ type: 'factory-reset', serial: d.serialNumber, name: d.name }); }}
             className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg" title="Factory Reset">
             <RotateCcw size={16} />
           </button>
@@ -222,6 +239,22 @@ export default function DevicesPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Confirm Dialog for dangerous actions */}
+      {confirmDialog && (
+        <ConfirmDialog
+          open={!!confirmDialog}
+          title={confirmDialog.type === 'factory-reset' ? 'Factory Reset Device' : 'Unpair Device'}
+          message={confirmDialog.type === 'factory-reset'
+            ? `This will erase ALL settings on "${confirmDialog.name}". This action cannot be undone.`
+            : `Unpair "${confirmDialog.name}" from its owner?`}
+          variant={confirmDialog.type === 'factory-reset' ? 'danger' : 'warning'}
+          confirmLabel={confirmDialog.type === 'factory-reset' ? 'Factory Reset' : 'Unpair'}
+          typeToConfirm={confirmDialog.type === 'factory-reset' ? confirmDialog.serial : undefined}
+          onConfirm={handleConfirmAction}
+          onCancel={() => setConfirmDialog(null)}
+        />
       )}
     </div>
   );

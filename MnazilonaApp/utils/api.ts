@@ -1,6 +1,5 @@
 // utils/api.ts
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import { API_URL, APP_CONFIG } from '../constants/api';
 
@@ -71,7 +70,7 @@ export const TokenManager = {
 export const UserDataManager = {
   async get<T = any>(): Promise<T | null> {
     try {
-      const data = await AsyncStorage.getItem(APP_CONFIG.USER_DATA_KEY);
+      const data = await SecureStore.getItemAsync(APP_CONFIG.USER_DATA_KEY);
       return data ? JSON.parse(data) : null;
     } catch {
       return null;
@@ -80,7 +79,7 @@ export const UserDataManager = {
 
   async set(data: Record<string, any>): Promise<void> {
     try {
-      await AsyncStorage.setItem(APP_CONFIG.USER_DATA_KEY, JSON.stringify(data));
+      await SecureStore.setItemAsync(APP_CONFIG.USER_DATA_KEY, JSON.stringify(data));
     } catch {
       // Non-fatal
     }
@@ -88,7 +87,7 @@ export const UserDataManager = {
 
   async remove(): Promise<void> {
     try {
-      await AsyncStorage.removeItem(APP_CONFIG.USER_DATA_KEY);
+      await SecureStore.deleteItemAsync(APP_CONFIG.USER_DATA_KEY);
     } catch {
       // Non-fatal
     }
@@ -96,13 +95,23 @@ export const UserDataManager = {
 
   async clear(): Promise<void> {
     try {
-      await AsyncStorage.removeItem(APP_CONFIG.USER_DATA_KEY);
+      await SecureStore.deleteItemAsync(APP_CONFIG.USER_DATA_KEY);
       await SecureStore.deleteItemAsync(APP_CONFIG.TOKEN_KEY);
     } catch {
       // Non-fatal
     }
   },
 };
+
+// ======================================
+// Auth Expiry Callback
+// ======================================
+// Set by auth module to handle 401 responses without circular imports
+let onAuthExpired: (() => void) | null = null;
+
+export function setAuthExpiredHandler(handler: () => void): void {
+  onAuthExpired = handler;
+}
 
 // ======================================
 // API Client
@@ -161,6 +170,11 @@ export async function apiRequest<T = any>(
     }
 
     if (!response.ok) {
+      // Auto-logout on 401: token expired or invalidated
+      if (response.status === 401 && requireAuth && onAuthExpired) {
+        onAuthExpired();
+      }
+
       return {
         success: false,
         message: data?.message || getDefaultErrorMessage(response.status),

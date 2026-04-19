@@ -2,9 +2,11 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { getAnomalies, updateAnomalyStatus } from '@/lib/api';
+import { useToast } from '@/components/Toast';
+import { getErrorMessage } from '@/lib/types';
 import { useSocket } from '@/lib/socket';
 import DataTable from '@/components/DataTable';
-import { Search, AlertTriangle, ShieldAlert, CheckCircle, XCircle, Eye, Zap } from 'lucide-react';
+import { AlertTriangle, ShieldAlert, CheckCircle, XCircle, Eye, Zap } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 
 interface AnomalyItem {
@@ -60,6 +62,7 @@ const statusColors: Record<string, string> = {
 };
 
 export default function AnomaliesPage() {
+  const toast = useToast();
   const [alerts, setAlerts] = useState<AnomalyItem[]>([]);
   const [stats, setStats] = useState<AnomalyStats | null>(null);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
@@ -80,25 +83,27 @@ export default function AnomaliesPage() {
       setAlerts(res.data.alerts);
       setPagination(res.data.pagination);
       setStats(res.data.stats);
-    } catch (err) { console.error(err); }
+    } catch (err) { toast.error(getErrorMessage(err, 'Failed to load anomalies')); }
     finally { setLoading(false); }
-  }, [statusFilter, severityFilter, typeFilter]);
+  }, [statusFilter, severityFilter, typeFilter, toast]);
 
   useEffect(() => { fetchAlerts(); }, [fetchAlerts]);
 
   // Real-time: listen for new anomaly alerts
   useEffect(() => {
     const off = on('anomaly:alert', () => {
+      toast.warning('New anomaly detected');
       fetchAlerts(pagination.page);
     });
     return off;
-  }, [on, fetchAlerts, pagination.page]);
+  }, [on, fetchAlerts, pagination.page, toast]);
 
   const handleStatusChange = async (id: string, newStatus: string) => {
     try {
       await updateAnomalyStatus(id, newStatus);
+      toast.success(`Alert ${newStatus}`);
       fetchAlerts(pagination.page);
-    } catch { alert('Failed to update alert status'); }
+    } catch (err) { toast.error(getErrorMessage(err, 'Failed to update alert status')); }
   };
 
   const columns = [

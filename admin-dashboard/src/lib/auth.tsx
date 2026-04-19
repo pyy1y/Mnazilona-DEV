@@ -1,9 +1,9 @@
 'use client';
 
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import Cookies from 'js-cookie';
-import { adminLoginSendCode, adminLoginVerifyCode } from './api';
+import { adminLoginSendCode, adminLoginVerifyCode, getDashboard } from './api';
 
 interface Admin {
   id: string;
@@ -23,27 +23,93 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Session timeout: 30 minutes of inactivity
+const SESSION_TIMEOUT = 30 * 60 * 1000;
+
+const COOKIE_OPTIONS = {
+  expires: 7,
+  sameSite: 'strict' as const,
+  // When you get a domain with HTTPS, this will auto-enable secure cookies
+  secure: typeof window !== 'undefined' && window.location.protocol === 'https:',
+  path: '/',
+};
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [admin, setAdmin] = useState<Admin | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const clearSession = useCallback(() => {
+    Cookies.remove('admin_token');
+    Cookies.remove('admin_refresh_token');
+    setToken(null);
+    setAdmin(null);
+  }, []);
+
+  const logout = useCallback(() => {
+    clearSession();
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    router.push('/login');
+  }, [clearSession, router]);
+
+  // Session timeout: reset on user activity
+  const resetSessionTimeout = useCallback(() => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    timeoutRef.current = setTimeout(() => {
+      logout();
+    }, SESSION_TIMEOUT);
+  }, [logout]);
+
+  // Track user activity for session timeout
+  useEffect(() => {
+    if (!token) return;
+
+    const events = ['mousedown', 'keydown', 'scroll', 'touchstart'];
+    const handler = () => resetSessionTimeout();
+
+    events.forEach((e) => window.addEventListener(e, handler, { passive: true }));
+    resetSessionTimeout();
+
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, handler));
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, [token, resetSessionTimeout]);
+
+  // On mount: validate token by making an API call instead of trusting cookie data
   useEffect(() => {
     const savedToken = Cookies.get('admin_token');
-    const savedAdmin = Cookies.get('admin_data');
 
-    if (savedToken && savedAdmin) {
-      try {
-        setToken(savedToken);
-        setAdmin(JSON.parse(savedAdmin));
-      } catch {
-        Cookies.remove('admin_token');
-        Cookies.remove('admin_data');
-      }
+    if (savedToken) {
+      setToken(savedToken);
+      // Validate token by fetching dashboard (lightweight check)
+      getDashboard()
+        .then(() => {
+          // Token is valid - decode admin info from token payload
+          try {
+            const payload = JSON.parse(atob(savedToken.split('.')[1]));
+            setAdmin({
+              id: payload.id || payload.sub || '',
+              name: payload.name || '',
+              email: payload.email || '',
+              role: payload.role || 'admin',
+            });
+          } catch {
+            // If token can't be decoded, clear it
+            clearSession();
+          }
+        })
+        .catch(() => {
+          // Token is invalid/expired
+          clearSession();
+        })
+        .finally(() => setLoading(false));
+    } else {
+      setLoading(false);
     }
-    setLoading(false);
-  }, []);
+  }, [clearSession]);
 
   const sendCode = async (email: string, password: string) => {
     await adminLoginSendCode(email, password);
@@ -51,27 +117,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const verifyCode = async (email: string, code: string) => {
     const res = await adminLoginVerifyCode(email, code);
-    const { token: newToken, admin: adminData } = res.data;
+    const { token: newToken, refreshToken, admin: adminData } = res.data;
 
-    const cookieOptions = {
-      expires: 7,
-      sameSite: 'strict' as const,
-      secure: window.location.protocol === 'https:',
-    };
-    Cookies.set('admin_token', newToken, cookieOptions);
-    Cookies.set('admin_data', JSON.stringify(adminData), cookieOptions);
+    // Store access token (short-lived) and refresh token (long-lived)
+    Cookies.set('admin_token', newToken, COOKIE_OPTIONS);
+    Cookies.set('admin_refresh_token', refreshToken, { ...COOKIE_OPTIONS, expires: 7 });
 
     setToken(newToken);
     setAdmin(adminData);
     router.push('/dashboard');
-  };
-
-  const logout = () => {
-    Cookies.remove('admin_token');
-    Cookies.remove('admin_data');
-    setToken(null);
-    setAdmin(null);
-    router.push('/login');
   };
 
   return (

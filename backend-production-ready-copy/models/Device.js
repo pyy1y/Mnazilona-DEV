@@ -56,6 +56,18 @@ const deviceSchema = new mongoose.Schema(
     adminLockedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     adminLockReason: { type: String, default: null },
 
+    // OTA Update Tracking
+    otaStatus: {
+      type: String,
+      enum: ['idle', 'notified', 'downloading', 'verifying', 'installing', 'rebooting', 'success', 'failed', 'rolled_back'],
+      default: 'idle',
+    },
+    otaTargetVersion: { type: String, default: null },
+    otaProgress: { type: Number, default: 0 },
+    otaError: { type: String, default: null },
+    otaStartedAt: { type: Date, default: null },
+    otaCompletedAt: { type: Date, default: null },
+
     // State
     state: { type: mongoose.Schema.Types.Mixed, default: {} },
   },

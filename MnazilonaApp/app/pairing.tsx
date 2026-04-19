@@ -29,8 +29,11 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 
 const BRAND = "#2E5B8E";
 const ESP_IP = "http://192.168.4.1";
-const AP_PASSWORD = "mnazilona123";
-const AP_SSID = "Mnazilona_Setup";
+// AP credentials are now dynamic per-device (derived from MAC address)
+// SSID format: Mnazilona_Setup_SN-XXX
+// Password format: mnz-XXXXXXXX (last 8 hex of MAC)
+// User must read these from the device sticker or packaging
+
 
 // ═══════════════════════════════════════
 // Types
@@ -55,6 +58,9 @@ export default function PairingScreen() {
   const [popCode, setPopCode] = useState("");
   const [ssid, setSsid] = useState("");
   const [password, setPassword] = useState("");
+  // Dynamic AP credentials (user reads from device sticker)
+  const [apSSID, setApSSID] = useState("");
+  const [apPassword, setApPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [statusText, setStatusText] = useState("");
   const [errorText, setErrorText] = useState("");
@@ -109,7 +115,7 @@ export default function PairingScreen() {
     // ──── اتصل بالشبكة مع retry لأن التحويل بين الشبكات ياخذ وقت ────
     setStep("connecting_ap");
     setLoading(true);
-    setStatusText(`Requesting to join ${AP_SSID}...`);
+    setStatusText(`Requesting to join ${apSSID}...`);
 
     const WIFI_MAX_RETRIES = 4;
     const WIFI_RETRY_DELAY = 3000;
@@ -123,14 +129,14 @@ export default function PairingScreen() {
       );
 
       try {
-        if (__DEV__) console.log(`[WiFi] iOS: Calling connectToProtectedSSID for ${AP_SSID} (attempt ${attempt + 1})`);
+        if (__DEV__) console.log(`[WiFi] iOS: Calling connectToProtectedSSID for ${apSSID} (attempt ${attempt + 1})`);
         await WifiManager.connectToProtectedSSID(
-          AP_SSID,
-          AP_PASSWORD,
+          apSSID,
+          apPassword,
           false,
           false
         );
-        if (__DEV__) console.log("[WiFi] Connected to:", AP_SSID);
+        if (__DEV__) console.log("[WiFi] Connected to:", apSSID);
         connected = true;
         break;
       } catch (e: any) {
@@ -161,7 +167,7 @@ export default function PairingScreen() {
       setLoading(false);
       Alert.alert(
         "Connection Failed",
-        `Could not connect to ${AP_SSID}.\n\nMake sure:\n• The device is powered on\n• The LED is blinking blue\n• You are near the device`,
+        `Could not connect to ${apSSID}.\n\nMake sure:\n• The device is powered on\n• The LED is blinking blue\n• You are near the device`,
         [
           { text: "Try Again", onPress: () => connectToDeviceAP() },
           { text: "Open WiFi Settings", onPress: () => {
@@ -372,9 +378,9 @@ export default function PairingScreen() {
     try {
       if (Platform.OS === "ios") {
         // iOS: لازم disconnectFromSSID عشان يشيل الشبكة المؤقتة بالكامل
-        if (AP_SSID) {
-          await WifiManager.disconnectFromSSID(AP_SSID);
-          if (__DEV__) console.log("[WiFi] iOS: disconnected from", AP_SSID);
+        if (apSSID) {
+          await WifiManager.disconnectFromSSID(apSSID);
+          if (__DEV__) console.log("[WiFi] iOS: disconnected from", apSSID);
         }
       } else {
         // Android: أول شي شيل forceWifiUsage عشان النظام يرجع يستخدم الشبكة العادية
@@ -459,9 +465,13 @@ export default function PairingScreen() {
 
     while (Date.now() - startTime < MAX_WAIT) {
       try {
+        const pollController = new AbortController();
+        const pollTimeout = setTimeout(() => pollController.abort(), 8000);
         const res = await fetch(`${API_URL}${ENDPOINTS.DEVICES.GET_ONE(sn)}`, {
           headers: { Authorization: `Bearer ${token}` },
+          signal: pollController.signal,
         });
+        clearTimeout(pollTimeout);
         if (res.ok) {
           const device = await res.json();
           if (device.isOnline) {
@@ -522,6 +532,8 @@ export default function PairingScreen() {
 
       if (__DEV__) console.log(`[Pairing] Attempt ${attempt + 1}/${MAX_ATTEMPTS} | SN: ${sn} | secret: ${secret ? "present" : "MISSING"}`);
 
+      const pairController = new AbortController();
+      const pairTimeout = setTimeout(() => pairController.abort(), 15000);
       const res = await fetch(`${API_URL}${ENDPOINTS.DEVICES.PAIR}`, {
         method: "POST",
         headers: {
@@ -532,7 +544,9 @@ export default function PairingScreen() {
           serialNumber: sn,
           deviceSecret: secret,
         }),
+        signal: pairController.signal,
       });
+      clearTimeout(pairTimeout);
 
       const data = await res.json();
       if (__DEV__) console.log(`[Pairing] Response: ${res.status}`, JSON.stringify(data));
@@ -656,21 +670,35 @@ export default function PairingScreen() {
             </Text>
 
             <View style={styles.infoBox}>
-              <Text style={styles.infoTitle}>What will happen:</Text>
+              <Text style={styles.infoTitle}>Device AP Credentials</Text>
               <Text style={styles.infoText}>
-                {"1. A system popup will ask to join \"" + AP_SSID + "\"\n"}
-                {"2. Tap "}
-                <Text style={{ fontWeight: "700" }}>Join</Text>
-                {" to connect\n"}
-                {"3. \"No Internet\" warning is normal\n"}
-                {"4. Enter the code from the device sticker"}
+                Enter the WiFi name and password printed on the device sticker or packaging.
               </Text>
             </View>
 
+            <Text style={styles.label}>Device WiFi Name (SSID)</Text>
+            <TextInput
+              style={styles.input}
+              value={apSSID}
+              onChangeText={setApSSID}
+              placeholder="Mnazilona_Setup_SN-XXX"
+              autoCapitalize="none"
+            />
+
+            <Text style={styles.label}>Device WiFi Password</Text>
+            <TextInput
+              style={styles.input}
+              value={apPassword}
+              onChangeText={setApPassword}
+              placeholder="mnz-XXXXXXXX"
+              autoCapitalize="none"
+              secureTextEntry
+            />
+
             <TouchableOpacity
-              style={[styles.btnMain, loading && styles.btnDisabled]}
+              style={[styles.btnMain, (!apSSID.trim() || !apPassword.trim() || loading) && styles.btnDisabled]}
               onPress={() => connectToDeviceAP()}
-              disabled={loading}
+              disabled={!apSSID.trim() || !apPassword.trim() || loading}
             >
               {loading ? (
                 <>

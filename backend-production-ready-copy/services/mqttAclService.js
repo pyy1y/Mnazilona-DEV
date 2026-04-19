@@ -1,9 +1,10 @@
+const crypto = require('crypto');
 const Device = require('../models/Device');
 const AllowedDevice = require('../models/AllowedDevice');
 
-const DEVICE_TOPIC_REGEX = /^mnazilona\/devices\/([A-Za-z0-9\-_.]+)\/(command|status|heartbeat|dp\/report)$/;
+const DEVICE_TOPIC_REGEX = /^mnazilona\/devices\/([A-Za-z0-9\-_.]+)\/(command|status|heartbeat|dp\/report|ota\/progress)$/;
 
-const DEVICE_PUBLISH_LEAVES = ['status', 'heartbeat', 'dp/report'];
+const DEVICE_PUBLISH_LEAVES = ['status', 'heartbeat', 'dp/report', 'ota/progress'];
 const DEVICE_SUBSCRIBE_LEAVES = ['command'];
 const USER_PUBLISH_LEAVES = ['command'];
 const USER_SUBSCRIBE_LEAVES = ['status', 'heartbeat', 'dp/report'];
@@ -114,7 +115,10 @@ const mqttAuthWebhook = async (req, res) => {
       const backendUser = process.env.MQTT_USERNAME || 'mqtt-user';
       const backendPass = process.env.MQTT_PASSWORD || '';
       if (username === backendUser) {
-        if (password === backendPass) {
+        // Timing-safe comparison to prevent timing attacks
+        const passBuffer = Buffer.from(password || '');
+        const expectedBuffer = Buffer.from(backendPass);
+        if (passBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(passBuffer, expectedBuffer)) {
           return res.json({ result: 'allow' });
         }
         return res.json({ result: 'deny' });
@@ -125,10 +129,13 @@ const mqttAuthWebhook = async (req, res) => {
         const device = await AllowedDevice.findOne({
           serialNumber: serialNumber.toUpperCase().trim(),
           isBanned: false,
-        }).select('+mqttPassword');
+        }).select('+mqttPassword +mqttPasswordHash');
 
-        if (device && device.mqttPassword === password) {
-          return res.json({ result: 'allow' });
+        if (device) {
+          const isValid = await device.verifyMqttPassword(password);
+          if (isValid) {
+            return res.json({ result: 'allow' });
+          }
         }
         console.warn(`MQTT auth denied: ${username} - invalid credentials`);
         return res.json({ result: 'deny' });

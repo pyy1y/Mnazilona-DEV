@@ -9,10 +9,10 @@ const maskEmail = (email) => {
 
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim());
 
-// Password
+// Password - requires: 8+ chars, 1 uppercase, 1 lowercase, 1 digit, 1 special char
 const strongPassword = (password) => {
   if (!password || typeof password !== 'string') return false;
-  return /^(?=.*[A-Z])(?=.*\d).{8,}$/.test(password);
+  return /^(?=.*[A-Z])(?=.*[a-z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{}|;:'",.<>?/\\`~]).{8,128}$/.test(password);
 };
 
 // String
@@ -38,14 +38,21 @@ const isValidObjectId = (id) => /^[a-fA-F0-9]{24}$/.test(String(id || ''));
 
 // Auth
 const jwt = require('jsonwebtoken');
-const JWT_EXPIRY = '7d';
+const crypto = require('crypto');
+const ACCESS_TOKEN_EXPIRY = '15m';
+const REFRESH_TOKEN_EXPIRY = '7d';
+const REFRESH_TOKEN_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
 const generateToken = (user) => {
   return jwt.sign(
     { id: user._id, email: user.email, role: user.role || 'user', tokenVersion: user.tokenVersion || 0 },
     process.env.JWT_SECRET,
-    { expiresIn: JWT_EXPIRY }
+    { expiresIn: ACCESS_TOKEN_EXPIRY }
   );
+};
+
+const generateRefreshToken = () => {
+  return crypto.randomBytes(40).toString('hex');
 };
 
 const sanitizeUserResponse = (user) => ({
@@ -80,5 +87,6 @@ module.exports = {
   normalizeEmail, maskEmail, isValidEmail,
   strongPassword, sanitizeString, truncate,
   isEmpty, isValidObjectId, formatDate, timeAgo,
-  generateToken, sanitizeUserResponse,
+  generateToken, generateRefreshToken, sanitizeUserResponse,
+  REFRESH_TOKEN_EXPIRY_MS,
 };

@@ -6,15 +6,18 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
+const morgan = require('morgan');
 
 const { connectDB, disconnectDB, isHealthy } = require('./config/database');
 const { setupMQTT, disconnectMQTT, isMqttHealthy, MQTT_BROKER_URL } = require('./config/mqtt');
+const { disconnectRedis, isRedisHealthy } = require('./config/redis');
 const { setupSocket } = require('./config/socket');
 const routes = require('./routes');
 const { startDeviceTimeoutJob, stopDeviceTimeoutJob } = require('./jobs/deviceTimeoutJob');
 const { apiLimiter } = require('./middleware/rateLimiter');
 const { ipBlacklistMiddleware } = require('./middleware/ipBlacklist');
 const { trackEndpointAccess } = require('./services/anomalyDetector');
+const logger = require('./utils/logger');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -43,19 +46,62 @@ app.use(cors({
 }));
 
 app.use(compression());
+
+// Request logging
+if (NODE_ENV === 'production') {
+  // Production: compact JSON-style log with response time
+  morgan.token('body-size', (req) => req.headers['content-length'] || '0');
+  app.use(morgan(':remote-addr :method :url :status :res[content-length] - :response-time ms :body-size', {
+    skip: (req) => req.url === '/health',
+  }));
+} else {
+  app.use(morgan('dev', {
+    skip: (req) => req.url === '/health',
+  }));
+}
+
 app.use(express.json({ limit: '1mb' }));
 
 // NoSQL Injection Protection
-const sanitizeValue = (obj) => {
-  if (!obj || typeof obj !== 'object') return obj;
-  for (const key of Object.keys(obj)) {
-    if (key.startsWith('$')) { delete obj[key]; continue; }
-    if (typeof obj[key] === 'object') sanitizeValue(obj[key]);
+// express-mongo-sanitize is incompatible with Express 5 (req.query is read-only)
+function sanitizeValue(val) {
+  if (typeof val === 'string') return val;
+  if (Array.isArray(val)) return val.map(sanitizeValue);
+  if (val && typeof val === 'object') {
+    const clean = {};
+    for (const key of Object.keys(val)) {
+      if (key.startsWith('$') || key.includes('.')) continue;
+      clean[key] = sanitizeValue(val[key]);
+    }
+    return clean;
   }
-  return obj;
-};
+  return val;
+}
+app.use((req, _res, next) => {
+  if (req.body) req.body = sanitizeValue(req.body);
+  if (req.params) req.params = sanitizeValue(req.params);
+  // req.query is read-only in Express 5, sanitize individual values in-place
+  if (req.query) {
+    for (const key of Object.keys(req.query)) {
+      if (key.startsWith('$') || key.includes('.')) {
+        delete req.query[key];
+      } else {
+        req.query[key] = sanitizeValue(req.query[key]);
+      }
+    }
+  }
+  next();
+});
+
+// Request timeout - protect against slow loris and hanging connections
+const REQUEST_TIMEOUT_MS = 30000; // 30 seconds
 app.use((req, res, next) => {
-  if (req.body) sanitizeValue(req.body);
+  req.setTimeout(REQUEST_TIMEOUT_MS);
+  res.setTimeout(REQUEST_TIMEOUT_MS, () => {
+    if (!res.headersSent) {
+      res.status(408).json({ message: 'Request timeout' });
+    }
+  });
   next();
 });
 
@@ -78,6 +124,7 @@ app.use('/', routes);
 app.get('/health', (req, res) => {
   const dbHealthy = isHealthy();
   const mqttHealthy = isMqttHealthy();
+  const redisHealthy = isRedisHealthy();
   const health = {
     status: dbHealthy && mqttHealthy ? 'ok' : 'degraded',
     timestamp: new Date().toISOString(),
@@ -85,6 +132,7 @@ app.get('/health', (req, res) => {
     services: {
       database: dbHealthy ? 'connected' : 'disconnected',
       mqtt: mqttHealthy ? 'connected' : 'disconnected',
+      redis: redisHealthy ? 'connected' : 'disconnected',
     },
   };
   res.status(dbHealthy && mqttHealthy ? 200 : 503).json(health);
@@ -95,19 +143,20 @@ app.use((req, res) => res.status(404).json({ message: 'Not found' }));
 
 // Error handler
 app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err.message);
+  logger.error('Unhandled error', { error: err.message, path: req.path, method: req.method });
   res.status(500).json({ message: 'Internal server error' });
 });
 
 // Graceful shutdown
 let server;
 const gracefulShutdown = async (signal) => {
-  console.log(`${signal} received. Shutting down...`);
+  logger.info(`${signal} received. Shutting down...`);
   server.close(async () => {
     stopDeviceTimeoutJob();
     await disconnectMQTT();
+    await disconnectRedis();
     await disconnectDB();
-    console.log('Graceful shutdown completed');
+    logger.info('Graceful shutdown completed');
     process.exit(0);
   });
   setTimeout(() => process.exit(1), 30000);
@@ -116,14 +165,9 @@ const gracefulShutdown = async (signal) => {
 // Start
 const startServer = async () => {
   try {
-    const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET', 'EMAIL_USER', 'EMAIL_PASS', 'MQTT_PASSWORD'];
+    const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET', 'EMAIL_USER', 'EMAIL_PASS', 'MQTT_PASSWORD', 'MQTT_WEBHOOK_SECRET'];
     const missing = requiredEnvVars.filter((v) => !process.env[v]);
     if (missing.length) throw new Error(`Missing required env vars: ${missing.join(', ')}`);
-
-    // Warn if MQTT_WEBHOOK_SECRET is not set in production
-    if (NODE_ENV === 'production' && !process.env.MQTT_WEBHOOK_SECRET) {
-      console.warn('WARNING: MQTT_WEBHOOK_SECRET is not set. MQTT webhook endpoint is unprotected.');
-    }
 
     await connectDB();
     setupMQTT();
@@ -139,24 +183,28 @@ const startServer = async () => {
         cert: fs.readFileSync(sslCertPath),
       };
       server = https.createServer(sslOptions, app).listen(PORT, HOST, () => {
-        console.log(`Mnazilona IoT Server started on HTTPS ${HOST}:${PORT} [${NODE_ENV}]`);
+        logger.info(`Mnazilona IoT Server started on HTTPS ${HOST}:${PORT} [${NODE_ENV}]`);
       });
     } else {
       server = app.listen(PORT, HOST, () => {
-        console.log(`Mnazilona IoT Server started on ${HOST}:${PORT} [${NODE_ENV}]`);
+        logger.info(`Mnazilona IoT Server started on ${HOST}:${PORT} [${NODE_ENV}]`);
         if (NODE_ENV === 'production') {
-          console.warn('WARNING: Running without HTTPS. Set SSL_KEY_PATH and SSL_CERT_PATH for TLS.');
+          logger.warn('Running without HTTPS. Set SSL_KEY_PATH and SSL_CERT_PATH for TLS.');
         }
       });
     }
 
+    // Server-level timeouts
+    server.keepAliveTimeout = 65000; // slightly higher than typical LB timeout (60s)
+    server.headersTimeout = 66000;
+
     setupSocket(server);
-    console.log('Socket.IO attached to server');
+    logger.info('Socket.IO attached to server');
 
     process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
     process.on('SIGINT', () => gracefulShutdown('SIGINT'));
   } catch (error) {
-    console.error('Failed to start server:', error.message);
+    logger.error('Failed to start server', { error: error.message });
     process.exit(1);
   }
 };

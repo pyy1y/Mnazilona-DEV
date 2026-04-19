@@ -19,8 +19,10 @@ import { api, TokenManager, UserDataManager } from '../utils/api';
 import { ENDPOINTS, APP_CONFIG } from '../constants/api';
 import { normalizeEmail, sanitizeOTP, isValidOTP } from '../utils/validation';
 import { login } from '../utils/auth';
+import * as SecureStore from 'expo-secure-store';
 
 const BRAND_COLOR = '#2E5B8E';
+const REGISTER_DRAFT_KEY = '__register_draft';
 const DANGER_COLOR = '#FF3B30';
 
 // ======================================
@@ -36,10 +38,6 @@ type RegisterDraft = {
   country: string;
   city: string;
 };
-
-declare global {
-  var __registerDraft: RegisterDraft | undefined;
-}
 
 // ======================================
 // Mode Configuration
@@ -170,14 +168,24 @@ export default function OTPScreen() {
   // Validate register draft
   useEffect(() => {
     if (mode === 'register') {
-      const draft = globalThis.__registerDraft;
-      if (!draft || normalizeEmail(draft.email) !== emailFromParams) {
-        Alert.alert(
-          'Missing Data',
-          'Registration data was not found. Please register again.',
-          [{ text: 'OK', onPress: () => router.replace('/register') }]
-        );
-      }
+      (async () => {
+        try {
+          const raw = await SecureStore.getItemAsync(REGISTER_DRAFT_KEY);
+          if (!raw) {
+            Alert.alert('Missing Data', 'Registration data was not found. Please register again.',
+              [{ text: 'OK', onPress: () => router.replace('/register') }]);
+            return;
+          }
+          const draft: RegisterDraft = JSON.parse(raw);
+          if (normalizeEmail(draft.email) !== emailFromParams) {
+            Alert.alert('Missing Data', 'Registration data was not found. Please register again.',
+              [{ text: 'OK', onPress: () => router.replace('/register') }]);
+          }
+        } catch {
+          Alert.alert('Missing Data', 'Registration data was not found. Please register again.',
+            [{ text: 'OK', onPress: () => router.replace('/register') }]);
+        }
+      })();
     }
   }, [mode, emailFromParams, router]);
 
@@ -246,12 +254,13 @@ export default function OTPScreen() {
       if (mode === 'register') {
         endpoint = ENDPOINTS.AUTH.REGISTER_VERIFY;
 
-        const draft = globalThis.__registerDraft;
-        if (!draft) {
+        const raw = await SecureStore.getItemAsync(REGISTER_DRAFT_KEY);
+        if (!raw) {
           Alert.alert('Missing Data', 'Registration data not found. Please register again.');
           router.replace('/register');
           return;
         }
+        const draft: RegisterDraft = JSON.parse(raw);
 
         body = {
           email: displayEmail,
@@ -280,10 +289,9 @@ export default function OTPScreen() {
         await login(token, user);
       }
 
-      // Clear register draft (including password from memory)
-      if (mode === 'register' && globalThis.__registerDraft) {
-        globalThis.__registerDraft.password = '';
-        globalThis.__registerDraft = undefined;
+      // Clear register draft from SecureStore
+      if (mode === 'register') {
+        await SecureStore.deleteItemAsync(REGISTER_DRAFT_KEY);
       }
 
       // Navigate

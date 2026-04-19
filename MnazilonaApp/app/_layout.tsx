@@ -1,9 +1,10 @@
 // app/_layout.tsx
 
 import React, { useEffect, useState, useCallback } from 'react';
-import { View, ActivityIndicator, StyleSheet } from 'react-native';
+import { View, ActivityIndicator, StyleSheet, Alert, Platform } from 'react-native';
 import { Slot, useRouter, useSegments, useGlobalSearchParams } from 'expo-router';
-import { checkAuthState } from '../utils/auth';
+import { checkAuthState, logout } from '../utils/auth';
+import { setAuthExpiredHandler } from '../utils/api';
 
 const BRAND_COLOR = '#2E5B8E';
 
@@ -30,7 +31,10 @@ export default function RootLayout() {
   const [isReady, setIsReady] = useState(false);
   const [isChecking, setIsChecking] = useState(true);
 
-  const mode = (searchParams?.mode as string) || '';
+  // Sanitize deep link params to prevent injection
+  const ALLOWED_MODES = ['login', 'register', 'reset_password', 'delete_account'];
+  const rawMode = (searchParams?.mode as string) || '';
+  const mode = ALLOWED_MODES.includes(rawMode) ? rawMode : '';
 
   const checkAuth = useCallback(async () => {
     try {
@@ -73,6 +77,35 @@ export default function RootLayout() {
       setIsReady(true);
     }
   }, [router, segments, mode]);
+
+  // Jailbreak/root detection warning
+  useEffect(() => {
+    const checkDeviceIntegrity = () => {
+      if (Platform.OS === 'android') {
+        // Check for common root indicators via global object properties
+        const g = globalThis as any;
+        if (g.__is_rooted || g.RootBeer) {
+          Alert.alert(
+            'Security Warning',
+            'This device appears to be rooted. Your smart home data may be at risk.',
+            [{ text: 'I Understand' }]
+          );
+        }
+      }
+      // iOS jailbreak detection requires native modules (e.g. checking for Cydia paths)
+      // which are not accessible from Expo managed workflow JS layer.
+      // For production, consider expo-dev-client with a native jailbreak detection library.
+    };
+    checkDeviceIntegrity();
+  }, []);
+
+  // Register global 401 handler for auto-logout
+  useEffect(() => {
+    setAuthExpiredHandler(async () => {
+      await logout();
+      router.replace('/login');
+    });
+  }, [router]);
 
   useEffect(() => {
     checkAuth();

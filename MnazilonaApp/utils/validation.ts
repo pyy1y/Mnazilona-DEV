@@ -40,8 +40,16 @@ export function getPasswordStrengthErrors(password: string): string[] {
     errors.push('Password must contain at least 1 uppercase letter');
   }
 
+  if (!/[a-z]/.test(password)) {
+    errors.push('Password must contain at least 1 lowercase letter');
+  }
+
   if (!/\d/.test(password)) {
     errors.push('Password must contain at least 1 number');
+  }
+
+  if (!/[!@#$%^&*()_+\-=\[\]{}|;:'",.<>?/\\`~]/.test(password)) {
+    errors.push('Password must contain at least 1 special character');
   }
 
   return errors;
@@ -59,7 +67,11 @@ export function isValidName(name: string): boolean {
 
 export function sanitizeName(name: string): string {
   if (!name || typeof name !== 'string') return '';
-  return name.trim().replace(/[<>]/g, '').slice(0, VALIDATION.NAME_MAX_LENGTH);
+  return name
+    .trim()
+    .replace(/[<>"'&;\\\/\$`]/g, '')     // Strip XSS-risky characters
+    .replace(/[\x00-\x1F\x7F]/g, '')      // Strip control characters
+    .slice(0, VALIDATION.NAME_MAX_LENGTH);
 }
 
 // ======================================
@@ -67,7 +79,11 @@ export function sanitizeName(name: string): string {
 // ======================================
 export function sanitizeInput(input: string, maxLength: number = 500): string {
   if (!input || typeof input !== 'string') return '';
-  return input.trim().replace(/[<>]/g, '').slice(0, maxLength);
+  return input
+    .trim()
+    .replace(/[<>"'&;\\\/\$`]/g, '')       // Strip XSS-risky characters
+    .replace(/[\x00-\x1F\x7F]/g, '')        // Strip control characters
+    .slice(0, maxLength);
 }
 
 // ======================================

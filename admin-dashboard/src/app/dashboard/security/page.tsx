@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { getSecurityOverview, unbanDevice } from '@/lib/api';
+import { useToast } from '@/components/Toast';
+import { getErrorMessage } from '@/lib/types';
 import { ShieldAlert, Lock, Ban, AlertTriangle, Activity } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 
@@ -30,6 +32,7 @@ const actionLabels: Record<string, string> = {
 };
 
 export default function SecurityPage() {
+  const toast = useToast();
   const [data, setData] = useState<SecurityData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -37,18 +40,18 @@ export default function SecurityPage() {
     setLoading(true);
     getSecurityOverview()
       .then((res) => setData(res.data))
-      .catch(console.error)
+      .catch((err) => toast.error(getErrorMessage(err, 'Failed to load security data')))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => { fetchData(); }, []);
 
   const handleUnban = async (serial: string) => {
-    if (!confirm(`Unban ${serial}?`)) return;
     try {
       await unbanDevice(serial);
+      toast.success(`Device ${serial} unbanned`);
       fetchData();
-    } catch { alert('Failed to unban device'); }
+    } catch (err) { toast.error(getErrorMessage(err, 'Failed to unban device')); }
   };
 
   if (loading || !data) {
