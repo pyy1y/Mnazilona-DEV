@@ -173,6 +173,8 @@ exports.assignDevice = async (req, res) => {
     const { id } = req.params;
     const { serialNumber } = req.body;
 
+    console.log('assignDevice called:', { roomId: id, serialNumber, userId: req.user.id });
+
     if (!serialNumber) {
       return res.status(400).json({ message: 'Serial number is required' });
     }
@@ -183,10 +185,33 @@ exports.assignDevice = async (req, res) => {
 
     const room = await Room.findOne({ _id: id, owner: req.user.id });
     if (!room) {
+      console.log('Room not found:', { roomId: id, userId: req.user.id });
       return res.status(404).json({ message: 'Room not found' });
     }
 
     const cleanSerial = serialNumber.trim().toUpperCase();
+
+    // Check if device exists first (for better error messages)
+    const existingDevice = await Device.findOne({ serialNumber: cleanSerial })
+      .select('serialNumber owner deviceType name')
+      .lean();
+
+    if (!existingDevice) {
+      console.log('Device not found in DB:', cleanSerial);
+      return res.status(404).json({
+        message: `Device "${cleanSerial}" not found in database. Make sure the device is paired first.`,
+      });
+    }
+
+    if (!existingDevice.owner || existingDevice.owner.toString() !== req.user.id) {
+      console.log('Device owner mismatch:', {
+        deviceOwner: existingDevice.owner?.toString(),
+        requestUser: req.user.id,
+      });
+      return res.status(404).json({
+        message: 'Device not owned by you. Please pair the device to your account first.',
+      });
+    }
 
     // Use findOneAndUpdate to avoid issues with select:false fields (mqttToken, mqttUsername, mqttPassword)
     const device = await Device.findOneAndUpdate(
@@ -199,6 +224,8 @@ exports.assignDevice = async (req, res) => {
       return res.status(404).json({ message: 'Device not found or not owned by you' });
     }
 
+    console.log('Device assigned successfully:', { serial: cleanSerial, room: room.name });
+
     res.json({
       message: `Device "${device.name}" assigned to "${room.name}"`,
       device: {
@@ -209,7 +236,10 @@ exports.assignDevice = async (req, res) => {
     });
   } catch (error) {
     console.error('Assign device error:', error.message, error.stack);
-    res.status(500).json({ message: 'Failed to assign device to room' });
+    res.status(500).json({
+      message: 'Failed to assign device to room',
+      debug: error.message,
+    });
   }
 };
 
