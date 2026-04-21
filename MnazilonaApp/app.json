@@ -22,13 +22,7 @@
           "_http._tcp"
         ],
         "NSAppTransportSecurity": {
-          "NSAllowsArbitraryLoads": false,
-          "NSExceptionDomains": {
-            "192.168.4.1": {
-              "NSExceptionAllowsInsecureHTTPLoads": true,
-              "NSIncludesSubdomains": false
-            }
-          }
+          "NSAllowsArbitraryLoads": false
         }
       },
       "entitlements": {

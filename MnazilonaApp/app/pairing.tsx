@@ -1,50 +1,51 @@
 // app/pairing.tsx
 // ═══════════════════════════════════════════════════════════════
-// SoftAP Provisioning with Auto WiFi Connect
+// BLE Provisioning — replaces SoftAP WiFi Provisioning
 //
-// ✅ التعديلات:
-//   - pairWithServer يرسل deviceSecret (مطلوب من الباك إند)
-//   - إضافة validateDevice قبل الـ pair
-//   - إضافة VALIDATE endpoint في الاستخدام
-//   - retry logic محسّن مع exponential backoff
-//   - التعامل مع "already paired" بشكل أفضل
-//   - حفظ deviceSecret من الـ ESP أثناء الـ provisioning
-//   - تحسين afterProvisioningCleanup مع internet check
+// Flow:
+//   1. Scan for nearby Mnazilona BLE devices
+//   2. Select and connect to device
+//   3. Verify Proof of Possession code
+//   4. Device scans WiFi networks → app shows sorted list (2.4GHz)
+//   5. User selects network and enters password
+//   6. Credentials sent to device over BLE
+//   7. Device connects to WiFi, does server inquiry
+//   8. App pairs with backend server
 //
 // المكتبة المطلوبة:
-//   npx expo install react-native-wifi-reborn
+//   npx expo install react-native-ble-plx
 // ═══════════════════════════════════════════════════════════════
 
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput, Alert,
   ActivityIndicator, KeyboardAvoidingView, ScrollView, Platform,
-  Linking, PermissionsAndroid,
+  FlatList,
 } from "react-native";
 import { useRouter } from "expo-router";
-import WifiManager from "react-native-wifi-reborn";
 import { API_URL, ENDPOINTS } from "../constants/api";
 import { TokenManager } from "../utils/api";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import {
+  useBLEProvisioning,
+  DiscoveredDevice,
+  WiFiNetwork,
+} from "../hooks/useBLEProvisioning";
 
 const BRAND = "#2E5B8E";
-const ESP_IP = "http://192.168.4.1";
-// AP credentials are now dynamic per-device (derived from MAC address)
-// SSID format: Mnazilona_Setup_SN-XXX
-// Password format: mnz-XXXXXXXX (last 8 hex of MAC)
-// User must read these from the device sticker or packaging
-
 
 // ═══════════════════════════════════════
 // Types
 // ═══════════════════════════════════════
 type PairingStep =
-  | "scan_devices"
-  | "connecting_ap"
-  | "enter_pop"
-  | "enter_wifi"
-  | "provisioning"
-  | "pairing"
+  | "scan_devices"    // BLE scanning for nearby devices
+  | "connecting_ble"  // Connecting to selected BLE device
+  | "enter_pop"       // Verify PoP code
+  | "scanning_wifi"   // Device is scanning WiFi networks
+  | "select_wifi"     // User picks a network from the list
+  | "enter_password"  // User enters WiFi password
+  | "provisioning"    // Sending credentials, device connecting
+  | "pairing"         // Linking with backend
   | "done"
   | "error";
 
@@ -53,25 +54,23 @@ type PairingStep =
 // ═══════════════════════════════════════
 export default function PairingScreen() {
   const router = useRouter();
+  const ble = useBLEProvisioning();
 
   const [step, setStep] = useState<PairingStep>("scan_devices");
   const [popCode, setPopCode] = useState("");
-  const [ssid, setSsid] = useState("");
+  const [selectedWifi, setSelectedWifi] = useState<WiFiNetwork | null>(null);
   const [password, setPassword] = useState("");
-  // Dynamic AP credentials (user reads from device sticker)
-  const [apSSID, setApSSID] = useState("");
-  const [apPassword, setApPassword] = useState("");
+  const [wifiNetworks, setWifiNetworks] = useState<WiFiNetwork[]>([]);
   const [loading, setLoading] = useState(false);
   const [statusText, setStatusText] = useState("");
   const [errorText, setErrorText] = useState("");
   const [serialNumber, _setSerialNumber] = useState("");
   const [deviceName, setDeviceName] = useState("");
 
-  // ✅ حفظ الـ deviceSecret اللي نحصل عليه من الـ ESP
+  // deviceSecret from the PoP verify response (popToken)
   const [deviceSecret, _setDeviceSecret] = useState("");
 
-  // ✅ Refs عشان نضمن القيم الأخيرة في الـ async callbacks
-  // React useState closures ممكن تكون stale في async chains طويلة
+  // Refs for async chain safety
   const serialNumberRef = useRef("");
   const deviceSecretRef = useRef("");
 
@@ -84,189 +83,65 @@ export default function PairingScreen() {
     _setDeviceSecret(value);
   };
 
+  // Cleanup BLE on unmount
+  useEffect(() => {
+    return () => {
+      ble.disconnect();
+    };
+  }, []);
+
   // ═══════════════════════════════════════
-  // Android: طلب صلاحيات الموقع
+  // Step 1: Scan for BLE Devices
   // ═══════════════════════════════════════
-  const requestLocationPermission = async (): Promise<boolean> => {
-    if (Platform.OS === "android") {
-      const granted = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-        {
-          title: "Location Permission",
-          message: "WiFi scanning requires location permission.",
-          buttonPositive: "OK",
-        }
-      );
-      return granted === PermissionsAndroid.RESULTS.GRANTED;
-    }
-    return true;
+  const startBLEScan = async () => {
+    setStep("scan_devices");
+    setLoading(true);
+    setStatusText("Scanning for nearby devices...");
+    setErrorText("");
+
+    await ble.startScan(12000); // 12 seconds
+
+    // Scanning runs in background via the hook — devices appear reactively
+    // After scan duration, loading stops
+    setTimeout(() => {
+      setLoading(false);
+      setStatusText("");
+    }, 12500);
   };
 
   // ═══════════════════════════════════════
-  // Step 1: البحث والاتصال بشبكة الجهاز
+  // Step 1b: Connect to Selected Device
   // ═══════════════════════════════════════
-  const connectToDeviceAP = async () => {
-    const granted = await requestLocationPermission();
-    if (!granted) {
-      Alert.alert("Permission Required", "Location permission is needed to connect to the device.");
-      return;
-    }
-
-    // ──── اتصل بالشبكة مع retry لأن التحويل بين الشبكات ياخذ وقت ────
-    setStep("connecting_ap");
+  const connectToDevice = async (device: DiscoveredDevice) => {
+    ble.stopScan();
+    setStep("connecting_ble");
     setLoading(true);
-    setStatusText(`Requesting to join ${apSSID}...`);
+    setStatusText(`Connecting to ${device.name}...`);
 
-    const WIFI_MAX_RETRIES = 4;
-    const WIFI_RETRY_DELAY = 3000;
-    let connected = false;
+    const info = await ble.connectToDevice(device.id);
 
-    for (let attempt = 0; attempt < WIFI_MAX_RETRIES; attempt++) {
-      setStatusText(
-        attempt === 0
-          ? `Waiting for network join...`
-          : `Retrying connection... (${attempt + 1}/${WIFI_MAX_RETRIES})`
-      );
-
-      try {
-        if (__DEV__) console.log(`[WiFi] iOS: Calling connectToProtectedSSID for ${apSSID} (attempt ${attempt + 1})`);
-        await WifiManager.connectToProtectedSSID(
-          apSSID,
-          apPassword,
-          false,
-          false
-        );
-        if (__DEV__) console.log("[WiFi] Connected to:", apSSID);
-        connected = true;
-        break;
-      } catch (e: any) {
-        const errorMsg = e.message || e.code || String(e);
-        if (__DEV__) console.log(`[WiFi] Connect attempt ${attempt + 1}/${WIFI_MAX_RETRIES} failed:`, errorMsg);
-
-        // ✅ iOS: لو المستخدم رفض الانضمام (ضغط Cancel في popup النظام)
-        if (errorMsg.includes("userDenied") || errorMsg.includes("UserDenied")) {
-          setLoading(false);
-          Alert.alert(
-            "Connection Cancelled",
-            "You need to tap \"Join\" on the system popup to connect to the device.",
-            [
-              { text: "Try Again", onPress: () => connectToDeviceAP() },
-              { text: "Cancel", style: "cancel", onPress: () => setStep("scan_devices") },
-            ]
-          );
-          return;
-        }
-
-        if (attempt < WIFI_MAX_RETRIES - 1) {
-          await new Promise(resolve => setTimeout(resolve, WIFI_RETRY_DELAY));
-        }
-      }
-    }
-
-    if (!connected) {
+    if (info) {
+      setSerialNumberSynced(info.serial);
+      setDeviceName(info.name || "Mnazilona Device");
       setLoading(false);
-      Alert.alert(
-        "Connection Failed",
-        `Could not connect to ${apSSID}.\n\nMake sure:\n• The device is powered on\n• The LED is blinking blue\n• You are near the device`,
-        [
-          { text: "Try Again", onPress: () => connectToDeviceAP() },
-          { text: "Open WiFi Settings", onPress: () => {
-            if (Platform.OS === "ios") {
-              Linking.openURL("App-Prefs:WIFI");
-            }
-          }},
-          { text: "Cancel", style: "cancel", onPress: () => setStep("scan_devices") },
-        ]
-      );
-      return;
-    }
 
-    // ✅ متصلين بنجاح
-    setStatusText("Connected! Reading device info...");
-
-    try {
-      if (Platform.OS === "android") {
-        try {
-          await WifiManager.forceWifiUsageWithOptions(true, { noInternet: true });
-        } catch (e) {
-          if (__DEV__) console.log("[WiFi] forceWifiUsage error (non-critical):", e);
-        }
+      if (info.popRequired) {
+        setStep("enter_pop");
+      } else {
+        // PoP already verified (unlikely on fresh device, but handle it)
+        startWiFiScan();
       }
-
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      await fetchDeviceInfoWithRetry();
-
-    } catch (e: any) {
-      if (__DEV__) console.log("[WiFi] Post-connect error:", e.message || e);
+    } else {
       setLoading(false);
-      setErrorText("Connected to device network but setup failed. Try again.");
+      setErrorText(ble.error || "Failed to connect to device.");
       setStep("error");
     }
   };
 
   // ═══════════════════════════════════════
-  // Fetch Device Info (with retry)
-  // ✅ يحاول عدة مرات لأن التحويل بين الشبكات ياخذ وقت
-  // ═══════════════════════════════════════
-  const fetchDeviceInfoWithRetry = async () => {
-    const MAX_RETRIES = 5;
-    const RETRY_DELAY = 2500; // 2.5 ثانية بين كل محاولة
-
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      setStatusText(
-        attempt === 0
-          ? "Reading device info..."
-          : `Waiting for device connection... (${attempt + 1}/${MAX_RETRIES})`
-      );
-
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5000);
-
-        const res = await fetch(`${ESP_IP}/info`, {
-          method: "GET",
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeout);
-        const data = await res.json();
-
-        if (data.serial) {
-          setSerialNumberSynced(data.serial);
-          setDeviceName(data.name || "Mnazilona Device");
-          const secret = data.deviceSecret || data.device_secret || data.secret;
-          if (secret) {
-            setDeviceSecretSynced(secret);
-          }
-          if (__DEV__) console.log("[Pairing] Device found:", data.serial);
-          setLoading(false);
-          setStep("enter_pop");
-          return; // نجح - نطلع
-        } else {
-          throw new Error("Invalid device response");
-        }
-      } catch (e: any) {
-        if (__DEV__) console.log(`[Pairing] Device info attempt ${attempt + 1}/${MAX_RETRIES} failed:`, e.message);
-
-        if (attempt < MAX_RETRIES - 1) {
-          // ننتظر ونحاول مرة ثانية - الشبكة لسا تتحول
-          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-        }
-      }
-    }
-
-    // كل المحاولات فشلت
-    if (__DEV__) console.log("[Pairing] All device info attempts failed");
-    setLoading(false);
-    setErrorText("Connected to network but can't reach the device. Try again.");
-    setStep("error");
-  };
-
-  // ═══════════════════════════════════════
   // Step 2: Verify PoP Code
-  // ✅ يحفظ deviceSecret من الاستجابة
   // ═══════════════════════════════════════
-  const verifyPopCode = async () => {
+  const verifyPop = async () => {
     if (!popCode || popCode.length < 4) {
       return Alert.alert("Code Required", "Enter the code shown on the device sticker.");
     }
@@ -274,228 +149,108 @@ export default function PairingScreen() {
     setLoading(true);
     setStatusText("Verifying code...");
 
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
+    const { success, data } = await ble.verifyPopCode(popCode);
 
-      const res = await fetch(`${ESP_IP}/verify`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: popCode.trim() }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeout);
-      const data = await res.json();
-
-      if (res.ok && data.status === "ok") {
-        // ✅ حفظ deviceSecret من verify response لو موجود (يدعم أسماء مختلفة)
-        const secret = data.deviceSecret || data.device_secret || data.secret;
-        if (secret) {
-          setDeviceSecretSynced(secret);
-          if (__DEV__) console.log("[Pairing] Got deviceSecret from verify");
-        }
-        setLoading(false);
-        setStep("enter_wifi");
-        if (__DEV__) console.log("[Pairing] PoP verified!");
-      } else if (res.status === 429) {
-        setLoading(false);
-        Alert.alert("Locked", data.message || "Too many attempts. Wait and try again.");
-      } else {
-        setLoading(false);
-        const attemptsLeft = data.attemptsLeft || "?";
-        Alert.alert("Wrong Code", `Incorrect code. ${attemptsLeft} attempts remaining.`);
-        setPopCode("");
+    if (success) {
+      // Save the derived token as deviceSecret for backend pairing
+      const secret = data.popToken || data.deviceSecret || data.device_secret || data.secret;
+      if (secret) {
+        setDeviceSecretSynced(secret);
+        if (__DEV__) console.log("[Pairing] Got deviceSecret from verify");
       }
+      setLoading(false);
+      if (__DEV__) console.log("[Pairing] PoP verified!");
+      startWiFiScan();
+    } else if (data.status === "locked") {
+      setLoading(false);
+      Alert.alert("Locked", data.message || "Too many attempts. Wait and try again.");
+    } else {
+      setLoading(false);
+      const attemptsLeft = data.attemptsLeft || "?";
+      Alert.alert("Wrong Code", `Incorrect code. ${attemptsLeft} attempts remaining.`);
+      setPopCode("");
+    }
+  };
+
+  // ═══════════════════════════════════════
+  // Step 3: Request WiFi Scan from Device
+  // ═══════════════════════════════════════
+  const startWiFiScan = async () => {
+    setStep("scanning_wifi");
+    setLoading(true);
+    setStatusText("Device is scanning for WiFi networks...");
+
+    try {
+      const networks = await ble.requestWiFiScan();
+      setWifiNetworks(networks);
+      setLoading(false);
+      setStep("select_wifi");
     } catch (e: any) {
       setLoading(false);
-      Alert.alert("Error", "Lost connection to device. Try reconnecting.");
-      setStep("scan_devices");
+      if (__DEV__) console.log("[Pairing] WiFi scan failed:", e.message);
+      Alert.alert(
+        "Scan Failed",
+        "Could not get WiFi networks from device. Try again.",
+        [
+          { text: "Retry", onPress: () => startWiFiScan() },
+          { text: "Cancel", style: "cancel", onPress: () => setStep("error") },
+        ]
+      );
     }
   };
 
   // ═══════════════════════════════════════
-  // Step 3: Send WiFi Config
+  // Step 4: User Selects WiFi Network
   // ═══════════════════════════════════════
-  const sendWifiConfig = async () => {
-    if (!ssid) return Alert.alert("Required", "Enter the WiFi network name.");
+  const selectWifi = (network: WiFiNetwork) => {
+    setSelectedWifi(network);
+    if (network.secure) {
+      setStep("enter_password");
+    } else {
+      // Open network — send directly
+      sendWifiCredentials(network.ssid, "");
+    }
+  };
 
-    setLoading(true);
+  // ═══════════════════════════════════════
+  // Step 5: Send WiFi Credentials
+  // ═══════════════════════════════════════
+  const sendWifiCredentials = async (ssid: string, pass: string) => {
     setStep("provisioning");
-    setStatusText("Sending WiFi settings...");
+    setLoading(true);
+    setStatusText("Sending WiFi settings to device...");
 
-    try {
-      const controller = new AbortController();
-      // ✅ زيادة الـ timeout لأن الجهاز يجرب الواي فاي قبل ما يرد (AP+STA)
-      const timeout = setTimeout(() => controller.abort(), 20000);
+    const { success, data } = await ble.sendWiFiConfig(ssid, pass);
 
-      const res = await fetch(`${ESP_IP}/setup`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ssid, password }),
-        signal: controller.signal,
-      });
+    if (success) {
+      if (__DEV__) console.log("[Pairing] WiFi config sent — device connected!");
+      // Device will stop BLE, connect to WiFi, do server inquiry
+      // We can disconnect BLE now (device already stopped it)
+      await ble.disconnect();
 
-      clearTimeout(timeout);
-      const data = await res.json();
+      setStatusText("Waiting for device to register...");
+      // Give device time to do server inquiry + MQTT connect
+      await new Promise(resolve => setTimeout(resolve, 5000));
 
-      if (data.status === "ok") {
-        // ✅ لو الجهاز رجع deviceSecret في setup response
-        const secret = data.deviceSecret || data.device_secret || data.secret;
-        if (secret) {
-          setDeviceSecretSynced(secret);
-        }
-        if (__DEV__) console.log("[Pairing] Config sent - WiFi connected!");
-        afterProvisioningCleanup();
-      } else if (data.status === "wifi_error") {
-        // ❌ بيانات الشبكة غلط — الجهاز لسا في وضع AP، المستخدم يقدر يعيد المحاولة
-        if (__DEV__) console.log("[Pairing] WiFi failed:", data.message);
-        setLoading(false);
-        Alert.alert(
-          "WiFi Connection Failed",
-          data.message || "Could not connect to WiFi. Check your network name and password.",
-          [{ text: "OK" }]
-        );
-        setStep("enter_wifi");
-      } else {
-        throw new Error(data.message || "Setup failed");
-      }
-    } catch (e: any) {
-      // طبيعي - الجهاز فصل الـ AP بعد اتصال ناجح
-      if (__DEV__) console.log("[Pairing] Connection lost after setup (expected)");
-      afterProvisioningCleanup();
+      pairWithServer(0);
+    } else if (data.status === "wifi_error") {
+      setLoading(false);
+      Alert.alert(
+        "WiFi Connection Failed",
+        data.message || "Could not connect to WiFi. Check your password.",
+        [{ text: "OK" }]
+      );
+      setStep("enter_password");
+    } else {
+      setLoading(false);
+      setErrorText(data.message || "Failed to configure WiFi.");
+      setStep("error");
     }
   };
 
   // ═══════════════════════════════════════
-  // بعد الإعداد: فك الارتباط بشبكة الجهاز
-  // ✅ محسّن: ينتظر حتى يرجع الإنترنت
-  // ═══════════════════════════════════════
-  const afterProvisioningCleanup = async () => {
-    setStatusText("Disconnecting from device...");
-
-    // ──── 1. فصل الجوال من شبكة الـ ESP ────
-    try {
-      if (Platform.OS === "ios") {
-        // iOS: لازم disconnectFromSSID عشان يشيل الشبكة المؤقتة بالكامل
-        if (apSSID) {
-          await WifiManager.disconnectFromSSID(apSSID);
-          if (__DEV__) console.log("[WiFi] iOS: disconnected from", apSSID);
-        }
-      } else {
-        // Android: أول شي شيل forceWifiUsage عشان النظام يرجع يستخدم الشبكة العادية
-        try {
-          await WifiManager.forceWifiUsageWithOptions(false, { noInternet: false });
-        } catch (e) {
-          if (__DEV__) console.log("[WiFi] forceWifiUsage reset error (non-critical):", e);
-        }
-        // بعدين افصل من شبكة الـ ESP
-        try {
-          await WifiManager.disconnect();
-        } catch (e) {}
-      }
-    } catch (e) {
-      if (__DEV__) console.log("[WiFi] Cleanup error (non-critical):", e);
-    }
-
-    // ──── 2. انتظر 3 ثواني عشان النظام يتحول للشبكة العادية ────
-    setStatusText("Switching to home WiFi...");
-    await new Promise(resolve => setTimeout(resolve, 3000));
-
-    // ──── 3. انتظر حتى يرجع الإنترنت ────
-    setStatusText("Waiting for internet connection...");
-    const hasInternet = await waitForInternet(20000);
-
-    if (!hasInternet) {
-      // لو ما رجع الإنترنت، جرب تتصل بالشبكة اللي أدخلها المستخدم
-      if (__DEV__) console.log("[WiFi] No internet - trying to connect to", ssid);
-      setStatusText("Reconnecting to " + ssid + "...");
-      try {
-        await WifiManager.connectToProtectedSSID(ssid, password, false, false);
-        await new Promise(resolve => setTimeout(resolve, 3000));
-      } catch (e) {
-        if (__DEV__) console.log("[WiFi] Reconnect failed:", e);
-      }
-    }
-
-    // ──── 4. انتظر الـ ESP32 يسوي inquiry ────
-    setStatusText("Waiting for device to register...");
-    await new Promise(resolve => setTimeout(resolve, 5000));
-
-    pairWithServer(0);
-  };
-
-  // ✅ Helper: انتظر حتى يرجع الإنترنت
-  const waitForInternet = async (maxWaitMs: number): Promise<boolean> => {
-    const startTime = Date.now();
-    const checkInterval = 2000;
-
-    while (Date.now() - startTime < maxWaitMs) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 3000);
-        const res = await fetch(`${API_URL}/health`, {
-          method: "GET",
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        if (res.ok) {
-          if (__DEV__) console.log("[Network] Internet is back!");
-          return true;
-        }
-      } catch (e) {
-        // مو متصل بعد
-      }
-      await new Promise(resolve => setTimeout(resolve, checkInterval));
-    }
-
-    if (__DEV__) console.log("[Network] Timed out waiting for internet");
-    return false;
-  };
-
-  // ═══════════════════════════════════════
-  // ✅ بعد الربط: انتظر حتى الجهاز يصير online
-  // ═══════════════════════════════════════
-  const waitForDeviceOnline = async (sn: string, token: string) => {
-    setStatusText("Waiting for device to come online...");
-
-    const MAX_WAIT = 30000; // 30 ثانية كحد أقصى
-    const POLL_INTERVAL = 3000;
-    const startTime = Date.now();
-
-    while (Date.now() - startTime < MAX_WAIT) {
-      try {
-        const pollController = new AbortController();
-        const pollTimeout = setTimeout(() => pollController.abort(), 8000);
-        const res = await fetch(`${API_URL}${ENDPOINTS.DEVICES.GET_ONE(sn)}`, {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: pollController.signal,
-        });
-        clearTimeout(pollTimeout);
-        if (res.ok) {
-          const device = await res.json();
-          if (device.isOnline) {
-            setStep("done");
-            setLoading(false);
-            setStatusText("Device added successfully!");
-            return;
-          }
-        }
-      } catch (e) {
-        // نتجاهل الخطأ ونعيد المحاولة
-      }
-      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
-    }
-
-    // ✅ حتى لو ما صار online خلال 30 ثانية، الربط نجح — نعرض done مع رسالة
-    setStep("done");
-    setLoading(false);
-    setStatusText("Device paired! It may take a moment to appear online in your dashboard.");
-  };
-
-  // ═══════════════════════════════════════
-  // Step 4: Pair with Backend
-  // ✅ يرسل deviceSecret + exponential backoff
+  // Step 6: Pair with Backend Server
+  // (Unchanged from AP version — same backend flow)
   // ═══════════════════════════════════════
   const pairWithServer = async (attempt: number) => {
     const MAX_ATTEMPTS = 7;
@@ -503,7 +258,6 @@ export default function PairingScreen() {
     setStatusText(`Linking device to your account... (${attempt + 1}/${MAX_ATTEMPTS})`);
 
     try {
-      // ✅ استخدم Refs بدل State — يضمن القيم الأخيرة حتى في async chains طويلة
       const sn = serialNumberRef.current;
       const secret = deviceSecretRef.current;
 
@@ -515,7 +269,6 @@ export default function PairingScreen() {
         return;
       }
 
-      // ✅ تحقق من الـ auth token قبل ما نرسل الطلب
       const token = await TokenManager.get();
       if (!token) {
         if (__DEV__) console.error("[Pairing] No auth token found!");
@@ -525,7 +278,6 @@ export default function PairingScreen() {
         return;
       }
 
-      // ✅ تحقق إن عندنا deviceSecret
       if (!secret) {
         if (__DEV__) console.warn("[Pairing] No deviceSecret available! Pair will likely fail with 400.");
       }
@@ -551,19 +303,16 @@ export default function PairingScreen() {
       const data = await res.json();
       if (__DEV__) console.log(`[Pairing] Response: ${res.status}`, JSON.stringify(data));
 
-      // ✅ نجاح
       if (res.ok) {
         await waitForDeviceOnline(sn, token);
         return;
       }
 
-      // ✅ "already paired to your account" = نجاح
       if (data.message?.toLowerCase().includes("already paired to your account")) {
         await waitForDeviceOnline(sn, token);
         return;
       }
 
-      // ✅ 409 = الجهاز مملوك لشخص ثاني — أرسلنا إشعار للمالك
       if (res.status === 409) {
         setStep("error");
         setLoading(false);
@@ -575,12 +324,10 @@ export default function PairingScreen() {
         return;
       }
 
-      // ✅ 404 = الجهاز ما سوى inquiry بعد — أعد المحاولة
       if (res.status === 404) {
         throw new Error("Device not ready yet");
       }
 
-      // ✅ 400 = بيانات ناقصة (مثل deviceSecret فاضي) — لا تعيد المحاولة
       if (res.status === 400) {
         if (__DEV__) console.error("[Pairing] Bad request:", data.message);
         setStep("error");
@@ -589,7 +336,6 @@ export default function PairingScreen() {
         return;
       }
 
-      // ✅ 401 = مشكلة في الـ auth token (منتهي أو غير صالح)
       if (res.status === 401) {
         if (__DEV__) console.error("[Pairing] Auth failed:", data.code || data.error);
         setStep("error");
@@ -598,7 +344,6 @@ export default function PairingScreen() {
         return;
       }
 
-      // ✅ 403 = deviceSecret غلط أو الجهاز محظور
       if (res.status === 403) {
         if (__DEV__) console.error("[Pairing] Forbidden:", data.message);
         setStep("error");
@@ -613,7 +358,6 @@ export default function PairingScreen() {
       if (__DEV__) console.log(`[Pairing] Attempt ${attempt + 1} failed:`, e.message);
 
       if (attempt < MAX_ATTEMPTS - 1) {
-        // ✅ Exponential backoff: 3s, 4.5s, 6.75s, 10s, ...
         const delay = Math.min(3000 * Math.pow(1.5, attempt), 15000);
         setTimeout(() => pairWithServer(attempt + 1), delay);
       } else {
@@ -625,6 +369,62 @@ export default function PairingScreen() {
   };
 
   // ═══════════════════════════════════════
+  // Wait for device to come online
+  // ═══════════════════════════════════════
+  const waitForDeviceOnline = async (sn: string, token: string) => {
+    setStatusText("Waiting for device to come online...");
+
+    const MAX_WAIT = 30000;
+    const POLL_INTERVAL = 3000;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < MAX_WAIT) {
+      try {
+        const pollController = new AbortController();
+        const pollTimeout = setTimeout(() => pollController.abort(), 8000);
+        const res = await fetch(`${API_URL}${ENDPOINTS.DEVICES.GET_ONE(sn)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: pollController.signal,
+        });
+        clearTimeout(pollTimeout);
+        if (res.ok) {
+          const device = await res.json();
+          if (device.isOnline) {
+            setStep("done");
+            setLoading(false);
+            setStatusText("Device added successfully!");
+            return;
+          }
+        }
+      } catch (e) {
+        // Ignore and retry
+      }
+      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+    }
+
+    setStep("done");
+    setLoading(false);
+    setStatusText("Device paired! It may take a moment to appear online in your dashboard.");
+  };
+
+  // ═══════════════════════════════════════
+  // Helper: signal strength icon
+  // ═══════════════════════════════════════
+  const wifiSignalIcon = (rssi: number): string => {
+    if (rssi > -50) return "wifi-strength-4";
+    if (rssi > -60) return "wifi-strength-3";
+    if (rssi > -70) return "wifi-strength-2";
+    if (rssi > -80) return "wifi-strength-1";
+    return "wifi-strength-outline";
+  };
+
+  const bleSignalIcon = (rssi: number): string => {
+    if (rssi > -50) return "bluetooth-connect";
+    if (rssi > -70) return "bluetooth";
+    return "bluetooth-off";
+  };
+
+  // ═══════════════════════════════════════
   // RENDER
   // ═══════════════════════════════════════
   return (
@@ -633,7 +433,7 @@ export default function PairingScreen() {
 
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()}>
+          <TouchableOpacity onPress={() => { ble.disconnect(); router.back(); }}>
             <MaterialCommunityIcons name="arrow-left" size={28} color={BRAND} />
           </TouchableOpacity>
           <Text style={styles.title}>Add Device</Text>
@@ -641,11 +441,11 @@ export default function PairingScreen() {
 
         {/* Step Indicator */}
         <View style={styles.steps}>
-          {["Connect", "Verify", "WiFi", "Done"].map((label, i) => {
+          {["Scan", "Verify", "WiFi", "Done"].map((label, i) => {
             const stepIndex =
-              ["scan_devices", "connecting_ap"].includes(step) ? 0
+              ["scan_devices", "connecting_ble"].includes(step) ? 0
               : step === "enter_pop" ? 1
-              : ["enter_wifi", "provisioning"].includes(step) ? 2
+              : ["scanning_wifi", "select_wifi", "enter_password", "provisioning"].includes(step) ? 2
               : 3;
             const isActive = i <= stepIndex;
             return (
@@ -658,66 +458,79 @@ export default function PairingScreen() {
           })}
         </View>
 
-        {/* ──── STEP 1: SCAN / CONNECT ──── */}
+        {/* ──── STEP 1: SCAN BLE DEVICES ──── */}
         {step === "scan_devices" && (
           <View>
             <View style={styles.center}>
-              <MaterialCommunityIcons name="access-point-network" size={70} color={BRAND} />
+              <MaterialCommunityIcons name="bluetooth-connect" size={70} color={BRAND} />
             </View>
-            <Text style={styles.h2}>Connect to Device</Text>
+            <Text style={styles.h2}>Find Your Device</Text>
             <Text style={styles.p}>
-              Make sure your device is powered on and the LED is blinking blue, then tap the button below.
+              Make sure your device is powered on and the LED is blinking blue, then tap the button below to search.
             </Text>
 
-            <View style={styles.infoBox}>
-              <Text style={styles.infoTitle}>Device AP Credentials</Text>
-              <Text style={styles.infoText}>
-                Enter the WiFi name and password printed on the device sticker or packaging.
-              </Text>
-            </View>
-
-            <Text style={styles.label}>Device WiFi Name (SSID)</Text>
-            <TextInput
-              style={styles.input}
-              value={apSSID}
-              onChangeText={setApSSID}
-              placeholder="Mnazilona_Setup_SN-XXX"
-              autoCapitalize="none"
-            />
-
-            <Text style={styles.label}>Device WiFi Password</Text>
-            <TextInput
-              style={styles.input}
-              value={apPassword}
-              onChangeText={setApPassword}
-              placeholder="mnz-XXXXXXXX"
-              autoCapitalize="none"
-              secureTextEntry
-            />
-
             <TouchableOpacity
-              style={[styles.btnMain, (!apSSID.trim() || !apPassword.trim() || loading) && styles.btnDisabled]}
-              onPress={() => connectToDeviceAP()}
-              disabled={!apSSID.trim() || !apPassword.trim() || loading}
+              style={[styles.btnMain, loading && styles.btnDisabled]}
+              onPress={startBLEScan}
+              disabled={loading}
             >
               {loading ? (
                 <>
                   <ActivityIndicator color="#fff" style={{ marginRight: 8 }} />
-                  <Text style={styles.btnTxt}>{statusText || "Searching..."}</Text>
+                  <Text style={styles.btnTxt}>Scanning...</Text>
                 </>
               ) : (
                 <>
-                  <MaterialCommunityIcons name="wifi-sync" size={20} color="#fff" style={{ marginRight: 8 }} />
-                  <Text style={styles.btnTxt}>Connect to Device</Text>
+                  <MaterialCommunityIcons name="bluetooth-audio" size={20} color="#fff" style={{ marginRight: 8 }} />
+                  <Text style={styles.btnTxt}>Scan for Devices</Text>
                 </>
               )}
             </TouchableOpacity>
 
+            {/* Device List */}
+            {ble.discoveredDevices.length > 0 && (
+              <View style={{ marginTop: 20 }}>
+                <Text style={styles.label}>Nearby Devices</Text>
+                {ble.discoveredDevices.map((device) => (
+                  <TouchableOpacity
+                    key={device.id}
+                    style={styles.deviceCard}
+                    onPress={() => connectToDevice(device)}
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
+                      <MaterialCommunityIcons
+                        name={bleSignalIcon(device.rssi) as any}
+                        size={24}
+                        color={BRAND}
+                        style={{ marginRight: 12 }}
+                      />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.deviceName}>{device.serialNumber}</Text>
+                        <Text style={styles.deviceSub}>Signal: {device.rssi} dBm</Text>
+                      </View>
+                      <MaterialCommunityIcons name="chevron-right" size={24} color="#999" />
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+
+            {!loading && ble.discoveredDevices.length === 0 && ble.bleState === "idle" && (
+              <Text style={[styles.p, { marginTop: 20 }]}>
+                No devices found yet. Make sure your device is nearby and in pairing mode.
+              </Text>
+            )}
+
+            {ble.error && (
+              <View style={[styles.infoBox, { backgroundColor: "#FFF3F0", borderColor: "#FFD0C7" }]}>
+                <Text style={[styles.infoText, { color: "#D32F2F" }]}>{ble.error}</Text>
+              </View>
+            )}
           </View>
         )}
 
-        {/* ──── CONNECTING ──── */}
-        {step === "connecting_ap" && (
+        {/* ──── CONNECTING BLE ──── */}
+        {step === "connecting_ble" && (
           <View style={styles.center}>
             <ActivityIndicator size="large" color={BRAND} />
             <Text style={[styles.h2, { marginTop: 20 }]}>Connecting to Device</Text>
@@ -753,7 +566,7 @@ export default function PairingScreen() {
 
             <TouchableOpacity
               style={[styles.btnMain, loading && styles.btnDisabled]}
-              onPress={verifyPopCode}
+              onPress={verifyPop}
               disabled={loading}
             >
               {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnTxt}>Verify</Text>}
@@ -761,40 +574,112 @@ export default function PairingScreen() {
           </View>
         )}
 
-        {/* ──── STEP 3: ENTER WIFI ──── */}
-        {step === "enter_wifi" && (
+        {/* ──── SCANNING WIFI ──── */}
+        {step === "scanning_wifi" && (
+          <View style={styles.center}>
+            <ActivityIndicator size="large" color={BRAND} />
+            <Text style={[styles.h2, { marginTop: 20 }]}>Scanning Networks</Text>
+            <Text style={styles.statusText}>{statusText}</Text>
+          </View>
+        )}
+
+        {/* ──── STEP 3: SELECT WIFI NETWORK ──── */}
+        {step === "select_wifi" && (
           <View>
             <View style={styles.center}>
               <MaterialCommunityIcons name="router-wireless" size={50} color={BRAND} />
             </View>
-            <Text style={styles.h2}>WiFi Setup</Text>
-            <Text style={styles.p}>Enter your home WiFi details to connect the device to the internet.</Text>
+            <Text style={styles.h2}>Select WiFi Network</Text>
+            <Text style={styles.p}>
+              Choose your home WiFi network. Only 2.4GHz networks are shown.
+            </Text>
 
-            <Text style={styles.label}>Network Name (SSID)</Text>
-            <TextInput
-              style={styles.input}
-              value={ssid}
-              onChangeText={setSsid}
-              placeholder="Home WiFi"
-              autoCapitalize="none"
-              autoFocus
-            />
+            {wifiNetworks.length === 0 ? (
+              <View style={styles.center}>
+                <Text style={styles.p}>No networks found.</Text>
+                <TouchableOpacity style={styles.btnOutline} onPress={startWiFiScan}>
+                  <Text style={styles.btnTxtBrand}>Scan Again</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View>
+                {wifiNetworks.map((network, index) => (
+                  <TouchableOpacity
+                    key={`${network.ssid}-${index}`}
+                    style={styles.deviceCard}
+                    onPress={() => selectWifi(network)}
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
+                      <MaterialCommunityIcons
+                        name={wifiSignalIcon(network.rssi) as any}
+                        size={24}
+                        color={BRAND}
+                        style={{ marginRight: 12 }}
+                      />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.deviceName}>{network.ssid || "(Hidden Network)"}</Text>
+                        <Text style={styles.deviceSub}>
+                          {network.rssi} dBm {network.secure ? "" : " (Open)"}
+                        </Text>
+                      </View>
+                      {network.secure && (
+                        <MaterialCommunityIcons name="lock" size={18} color="#888" />
+                      )}
+                    </View>
+                  </TouchableOpacity>
+                ))}
+
+                <TouchableOpacity style={[styles.btnOutline, { marginTop: 16 }]} onPress={startWiFiScan}>
+                  <MaterialCommunityIcons name="refresh" size={18} color={BRAND} style={{ marginRight: 8 }} />
+                  <Text style={styles.btnTxtBrand}>Scan Again</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+        )}
+
+        {/* ──── STEP 4: ENTER WIFI PASSWORD ──── */}
+        {step === "enter_password" && (
+          <View>
+            <View style={styles.center}>
+              <MaterialCommunityIcons name="wifi-lock" size={50} color={BRAND} />
+            </View>
+            <Text style={styles.h2}>Enter WiFi Password</Text>
+            <Text style={styles.p}>
+              Enter the password for "{selectedWifi?.ssid}".
+            </Text>
 
             <Text style={styles.label}>Password</Text>
             <TextInput
               style={styles.input}
               value={password}
               onChangeText={setPassword}
-              placeholder="••••••••"
+              placeholder="WiFi password"
               secureTextEntry
+              autoFocus
             />
 
             <TouchableOpacity
               style={[styles.btnMain, loading && styles.btnDisabled]}
-              onPress={sendWifiConfig}
+              onPress={() => {
+                if (selectedWifi) {
+                  sendWifiCredentials(selectedWifi.ssid, password);
+                }
+              }}
               disabled={loading}
             >
               <Text style={styles.btnTxt}>Connect Device</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.btnOutline}
+              onPress={() => {
+                setPassword("");
+                setSelectedWifi(null);
+                setStep("select_wifi");
+              }}
+            >
+              <Text style={styles.btnTxtBrand}>Choose Different Network</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -840,11 +725,17 @@ export default function PairingScreen() {
             <Text style={[styles.h2, { marginTop: 16 }]}>Something Went Wrong</Text>
             <Text style={styles.p}>{errorText}</Text>
 
-            <TouchableOpacity style={styles.btnMain} onPress={() => setStep("scan_devices")}>
+            <TouchableOpacity style={styles.btnMain} onPress={() => {
+              ble.disconnect();
+              setStep("scan_devices");
+            }}>
               <Text style={styles.btnTxt}>Try Again</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.btnOutline} onPress={() => router.back()}>
+            <TouchableOpacity style={styles.btnOutline} onPress={() => {
+              ble.disconnect();
+              router.back();
+            }}>
               <Text style={styles.btnTxtBrand}>Go Back</Text>
             </TouchableOpacity>
           </View>
@@ -892,4 +783,18 @@ const styles = StyleSheet.create({
   infoBox: { backgroundColor: "#F0F5FA", padding: 16, borderRadius: 12, marginBottom: 20, width: "100%", borderWidth: 1, borderColor: "#E0E8F0" },
   infoTitle: { fontWeight: "700", color: "#333", marginBottom: 8, fontSize: 15 },
   infoText: { color: "#555", fontSize: 14, lineHeight: 22 },
+
+  // Device & WiFi list cards
+  deviceCard: {
+    backgroundColor: "#F8FAFB",
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: "#E8ECF0",
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  deviceName: { fontSize: 16, fontWeight: "600", color: "#333" },
+  deviceSub: { fontSize: 13, color: "#888", marginTop: 2 },
 });

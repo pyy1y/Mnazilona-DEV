@@ -4,6 +4,10 @@ const { getRedisClient } = require('../config/redis');
 const { recordRateLimitHit } = require('../config/rateLimitStore');
 const { emitToAdmins } = require('../config/socket');
 
+const RATE_LIMIT_DISABLED = process.env.DISABLE_RATE_LIMIT === 'true';
+
+const noopLimiter = (req, res, next) => next();
+
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000;
 
 const createLimitHandler = (type) => (req, res) => {
@@ -94,11 +98,20 @@ const deviceInquiryLimiter = rateLimit({
   handler: createLimitHandler('device_inquiry'),
 });
 
-module.exports = {
-  otpSendLimiter,
-  otpVerifyLimiter,
-  apiLimiter,
-  strictLimiter,
-  loginLimiter,
-  deviceInquiryLimiter,
-};
+module.exports = RATE_LIMIT_DISABLED
+  ? {
+      otpSendLimiter: noopLimiter,
+      otpVerifyLimiter: noopLimiter,
+      apiLimiter: noopLimiter,
+      strictLimiter: noopLimiter,
+      loginLimiter: noopLimiter,
+      deviceInquiryLimiter: noopLimiter,
+    }
+  : {
+      otpSendLimiter,
+      otpVerifyLimiter,
+      apiLimiter,
+      strictLimiter,
+      loginLimiter,
+      deviceInquiryLimiter,
+    };

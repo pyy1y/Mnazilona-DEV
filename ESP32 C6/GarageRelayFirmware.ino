@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════════
  *  Mnazilona IoT - ESP32-C6 Firmware v1.0.0
- *  SoftAP + HTTP Provisioning + Proof of Possession + DeviceSecret
+ *  BLE Provisioning + Proof of Possession + DeviceSecret
  * ═══════════════════════════════════════════════════════════════
  *
  *  Garage Relay - Pulse Mode Only
@@ -11,6 +11,11 @@
  *  Arduino IDE Setup:
  *    Board:  ESP32C6 Dev Module
  *    Libs:   ArduinoJson (6.21.x+), PubSubClient (2.8.x+)
+ *
+ *  Provisioning changed from SoftAP to BLE GATT.
+ *  The device advertises a custom BLE service during pairing.
+ *  The mobile app connects via BLE, verifies PoP, requests a
+ *  WiFi scan, and sends WiFi credentials — all over BLE.
  *
  * ═══════════════════════════════════════════════════════════════
  */
@@ -32,6 +37,41 @@
 #include <esp_task_wdt.h>
 #include <time.h>
 
+// ═══════════════════════════════════════
+// BLE Provisioning
+// ═══════════════════════════════════════
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+// Custom GATT Service & Characteristic UUIDs for Mnazilona provisioning
+#define BLE_SERVICE_UUID        "4d4e5a00-4c4f-4e41-0001-000000000000"
+#define BLE_CHAR_DEVICE_INFO    "4d4e5a00-4c4f-4e41-0001-000000000001"  // Read
+#define BLE_CHAR_POP_VERIFY     "4d4e5a00-4c4f-4e41-0001-000000000002"  // Write + Notify
+#define BLE_CHAR_WIFI_SCAN      "4d4e5a00-4c4f-4e41-0001-000000000003"  // Write + Notify
+#define BLE_CHAR_WIFI_CONFIG    "4d4e5a00-4c4f-4e41-0001-000000000004"  // Write + Notify
+#define BLE_CHAR_STATUS         "4d4e5a00-4c4f-4e41-0001-000000000005"  // Read + Notify
+
+#define BLE_ADV_NAME_PREFIX     "MNZ_"
+#define BLE_TIMEOUT_MS          300000UL  // 5 minutes BLE advertising timeout
+
+// BLE globals
+BLEServer*         bleServer         = nullptr;
+BLECharacteristic* bleCharDeviceInfo = nullptr;
+BLECharacteristic* bleCharPopVerify  = nullptr;
+BLECharacteristic* bleCharWifiScan   = nullptr;
+BLECharacteristic* bleCharWifiConfig = nullptr;
+BLECharacteristic* bleCharStatus     = nullptr;
+bool               bleClientConnected = false;
+bool               bleProvisioning    = false;  // true when BLE provisioning is active
+uint32_t           bleStartTime       = 0;
+uint32_t           bleLastActivity    = 0;
+
+// BLE chunked transfer buffer (for WiFi scan results that exceed MTU)
+String             bleScanResultBuffer = "";
+int                bleScanChunkIndex   = 0;
+
 // Watchdog timeout: 30 seconds - resets device if loop() hangs
 #define WDT_TIMEOUT_SEC 30
 
@@ -46,16 +86,16 @@
 // استخدم أمر Provisioning لحرقها - لا تكتبها في الكود!
 // DEVICE_SECRET: مفتاح هوية الجهاز (32 حرف hex)
 // POP_CODE: رمز إثبات الحيازة (8+ حروف/أرقام، يُطبع على ملصق الجهاز)
-String deviceSecret = "";
-String popCode      = "";
+String deviceSecret = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
+String popCode      = "123456";
 
 // ═══════════════════════════════════════
 // SERVER & TLS CONFIG
 // ═══════════════════════════════════════
 // Production: use HTTPS with your domain
-#define SERVER_BASE_URL   "https://your-domain.com"
+//#define SERVER_BASE_URL   "https://your-domain.com"
 // Development: uncomment for local HTTP testing
-// #define SERVER_BASE_URL   "http://192.168.8.143:3000"
+#define SERVER_BASE_URL   "http://192.168.8.143:3000"
 #define SERVER_INQUIRY_PATH "/devices/inquiry"
 #define SERVER_OTA_CHECK_PATH "/devices/ota/check"
 
@@ -78,17 +118,10 @@ PASTE_YOUR_OTA_PUBLIC_KEY_HERE
 )EOF";
 
 // ═══════════════════════════════════════
-// SoftAP Settings
+// SoftAP Settings (LEGACY — no longer used for provisioning)
+// Provisioning now uses BLE. See BLE_* defines above.
+// Kept commented out for reference only.
 // ═══════════════════════════════════════
-// كلمة المرور تُبنى ديناميكياً من MAC Address لكل جهاز
-#define AP_SSID_PREFIX    "Mnazilona_Setup"
-String apSSID     = "";
-String apPassword = "";
-#define AP_CHANNEL        6
-#define AP_MAX_CLIENTS    1
-#define AP_IP             IPAddress(192, 168, 4, 1)
-#define AP_GATEWAY        IPAddress(192, 168, 4, 1)
-#define AP_SUBNET         IPAddress(255, 255, 255, 0)
 
 // ═══════════════════════════════════════
 // Hardware Pins
@@ -113,7 +146,7 @@ String apPassword = "";
 #define MQTT_HEARTBEAT_MS        30000UL
 #define MQTT_RECONNECT_MS        5000UL
 #define DOOR_SENSOR_CHECK_MS     2000UL   // كل ثانيتين يتشيك على حالة الباب
-#define AP_TIMEOUT_MS            300000UL
+// AP_TIMEOUT_MS replaced by BLE_TIMEOUT_MS (defined in BLE section above)
 
 // ═══════════════════════════════════════
 // Security
@@ -225,9 +258,8 @@ bool relayActive             = false;
 uint32_t lastHeartbeatMs     = 0;
 uint32_t lastMqttReconnectMs = 0;
 uint32_t lastWifiRetryMs     = 0;
-uint32_t apStartTime         = 0;
+// apStartTime/lastApActivity removed — replaced by bleStartTime/bleLastActivity (BLE section)
 uint32_t lastLedToggle       = 0;
-uint32_t lastApActivity      = 0;
 uint32_t lastDoorCheckMs     = 0;
 bool ledToggleState          = false;
 int mqttReconnectCount       = 0;
@@ -1801,36 +1833,12 @@ void stopLocalServer() {
 
 
 // ══════════════════════════════════════
-//            HTTP ENDPOINTS
+//      BLE PROVISIONING ENDPOINTS
+//  (replaces SoftAP HTTP provisioning)
 // ══════════════════════════════════════
-
-void sendJson(int code, const String& json) {
-  // SoftAP endpoints: direct connection from app, no wildcard CORS needed
-  server.sendHeader("Access-Control-Allow-Origin", "app://mnazilona");
-  server.send(code, "application/json", json);
-}
-
-void handleInfo() {
-  lastApActivity = millis();
-
-  StaticJsonDocument<256> doc;
-  doc["serial"]      = SERIAL_NUMBER;
-  doc["name"]        = DEVICE_NAME;
-  doc["type"]        = "relay";
-  doc["fw"]          = FIRMWARE_VERSION;
-  doc["popRequired"] = !popVerified;
-  doc["state"]       = (int)currentState;
-
-  String response;
-  serializeJson(doc, response);
-  sendJson(200, response);
-  Serial.println("[HTTP] GET /info");
-}
 
 // Generate HMAC-SHA256 token (time-limited, derived from device secret)
 String generatePopToken() {
-  // Token = HMAC-SHA256(deviceSecret, serialNumber + millis_bucket)
-  // Valid for ~5 minutes (millis / 300000)
   uint32_t bucket = millis() / 300000UL;
   String data = String(SERIAL_NUMBER) + String(bucket);
 
@@ -1843,7 +1851,6 @@ String generatePopToken() {
   mbedtls_md_hmac_finish(&ctx, hmac);
   mbedtls_md_free(&ctx);
 
-  // Convert to hex
   char hexToken[65];
   for (int i = 0; i < 32; i++) {
     sprintf(&hexToken[i * 2], "%02x", hmac[i]);
@@ -1852,303 +1859,413 @@ String generatePopToken() {
   return String(hexToken);
 }
 
-void handleVerify() {
-  lastApActivity = millis();
+// Helper: send a JSON string via BLE notify (handles chunking for large payloads)
+void bleNotify(BLECharacteristic* characteristic, const String& json) {
+  // BLE MTU is negotiated (typically 512 after negotiation, 20 default)
+  // We chunk to 500 bytes to be safe
+  const int CHUNK_SIZE = 500;
+  int len = json.length();
 
-  // PoP lockout check (survives reboot via NVS)
-  if (popLockedOut) {
-    if (millis() - popLockoutStart < POP_LOCKOUT_MS) {
-      uint32_t remaining = (POP_LOCKOUT_MS - (millis() - popLockoutStart)) / 1000;
-      StaticJsonDocument<128> doc;
-      doc["status"] = "locked";
-      doc["message"] = "Too many attempts";
-      doc["retryAfterSec"] = remaining;
-      String response;
-      serializeJson(doc, response);
-      sendJson(429, response);
+  if (len <= CHUNK_SIZE) {
+    characteristic->setValue(json.c_str());
+    characteristic->notify();
+    return;
+  }
+
+  // Chunked: prefix each chunk with "C<index>:" and last with "E<index>:"
+  int totalChunks = (len + CHUNK_SIZE - 1) / CHUNK_SIZE;
+  for (int i = 0; i < totalChunks; i++) {
+    String prefix = (i == totalChunks - 1) ? "E" : "C";
+    prefix += String(i) + ":";
+    int start = i * CHUNK_SIZE;
+    int chunkLen = min(CHUNK_SIZE, len - start);
+    String chunk = prefix + json.substring(start, start + chunkLen);
+    characteristic->setValue(chunk.c_str());
+    characteristic->notify();
+    delay(20);  // BLE needs time between notifications
+  }
+}
+
+// ── BLE Callbacks ──
+
+class BLEProvisioningServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) override {
+    bleClientConnected = true;
+    bleLastActivity = millis();
+    Serial.println("[BLE] Client connected");
+    addLog("BLE client connected", "info");
+  }
+
+  void onDisconnect(BLEServer* pServer) override {
+    bleClientConnected = false;
+    Serial.println("[BLE] Client disconnected");
+    addLog("BLE client disconnected", "info");
+    // Re-advertise if still in provisioning mode
+    if (bleProvisioning && currentState == STATE_AP_ACTIVE) {
+      delay(500);
+      pServer->startAdvertising();
+      Serial.println("[BLE] Re-advertising...");
+    }
+  }
+};
+
+// ── PoP Verify Callback ──
+class PopVerifyCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) override {
+    bleLastActivity = millis();
+    String value = pCharacteristic->getValue().c_str();
+
+    StaticJsonDocument<128> doc;
+    if (deserializeJson(doc, value)) {
+      bleNotify(bleCharPopVerify, "{\"status\":\"error\",\"message\":\"Invalid JSON\"}");
       return;
     }
-    // Lockout expired
-    popLockedOut = false;
-    resetPopAttempts();
-  }
 
-  if (!server.hasArg("plain")) {
-    sendJson(400, "{\"status\":\"error\",\"message\":\"No body\"}");
-    return;
-  }
+    String code = doc["code"] | "";
+    code.trim();
 
-  StaticJsonDocument<128> doc;
-  if (deserializeJson(doc, server.arg("plain"))) {
-    sendJson(400, "{\"status\":\"error\",\"message\":\"Invalid JSON\"}");
-    return;
-  }
-
-  String code = doc["code"] | "";
-  code.trim();
-
-  // Input length validation (PoP codes are short - reject obviously wrong inputs)
-  if (code.length() == 0 || code.length() > 32) {
-    sendJson(400, "{\"status\":\"error\",\"message\":\"Invalid code length\"}");
-    return;
-  }
-
-  // Constant-time comparison to prevent timing attacks
-  bool match = false;
-  if (code.length() == popCode.length() && code.length() > 0) {
-    volatile uint8_t result = 0;
-    for (size_t i = 0; i < code.length(); i++) {
-      result |= code[i] ^ popCode[i];
+    // PoP lockout check (survives reboot via NVS)
+    if (popLockedOut) {
+      if (millis() - popLockoutStart < POP_LOCKOUT_MS) {
+        uint32_t remaining = (POP_LOCKOUT_MS - (millis() - popLockoutStart)) / 1000;
+        StaticJsonDocument<128> rDoc;
+        rDoc["status"] = "locked";
+        rDoc["message"] = "Too many attempts";
+        rDoc["retryAfterSec"] = remaining;
+        String response;
+        serializeJson(rDoc, response);
+        bleNotify(bleCharPopVerify, response);
+        return;
+      }
+      popLockedOut = false;
+      resetPopAttempts();
     }
-    match = (result == 0);
-  }
 
-  if (match) {
-    popVerified = true;
-    resetPopAttempts();
-    currentState = STATE_POP_VERIFIED;
+    if (code.length() == 0 || code.length() > 32) {
+      bleNotify(bleCharPopVerify, "{\"status\":\"error\",\"message\":\"Invalid code length\"}");
+      return;
+    }
 
-    // Return a derived token instead of the raw device secret
-    // The app uses this token to authenticate with the server
-    String popToken = generatePopToken();
+    // Constant-time comparison to prevent timing attacks
+    bool match = false;
+    if (code.length() == popCode.length() && code.length() > 0) {
+      volatile uint8_t result = 0;
+      for (size_t i = 0; i < code.length(); i++) {
+        result |= code[i] ^ popCode[i];
+      }
+      match = (result == 0);
+    }
 
-    StaticJsonDocument<256> rDoc;
-    rDoc["status"]    = "ok";
-    rDoc["message"]   = "Verified";
-    rDoc["popToken"]  = popToken;   // Derived, time-limited token (NOT the raw secret)
+    if (match) {
+      popVerified = true;
+      resetPopAttempts();
+      currentState = STATE_POP_VERIFIED;
 
-    String response;
-    serializeJson(rDoc, response);
-    sendJson(200, response);
-    Serial.println("[HTTP] PoP VERIFIED - derived token sent to app");
-  } else {
-    popAttempts++;
-    savePopAttempts();  // Persist to NVS (survives reboot)
-    Serial.printf("[HTTP] PoP FAILED (attempt %d/%d)\n", popAttempts, MAX_POP_ATTEMPTS);
-
-    if (popAttempts >= MAX_POP_ATTEMPTS) {
-      popLockedOut = true;
-      popLockoutStart = millis();
-      sendJson(429, "{\"status\":\"locked\",\"message\":\"Too many attempts. Device locked.\"}");
-    } else {
-      StaticJsonDocument<128> rDoc;
-      rDoc["status"]       = "error";
-      rDoc["message"]      = "Wrong code";
-      rDoc["attemptsLeft"] = MAX_POP_ATTEMPTS - popAttempts;
+      String popToken = generatePopToken();
+      StaticJsonDocument<256> rDoc;
+      rDoc["status"]   = "ok";
+      rDoc["message"]  = "Verified";
+      rDoc["popToken"] = popToken;
       String response;
       serializeJson(rDoc, response);
-      sendJson(401, response);
+      bleNotify(bleCharPopVerify, response);
+      Serial.println("[BLE] PoP VERIFIED");
+    } else {
+      popAttempts++;
+      savePopAttempts();
+      Serial.printf("[BLE] PoP FAILED (attempt %d/%d)\n", popAttempts, MAX_POP_ATTEMPTS);
+
+      if (popAttempts >= MAX_POP_ATTEMPTS) {
+        popLockedOut = true;
+        popLockoutStart = millis();
+        bleNotify(bleCharPopVerify, "{\"status\":\"locked\",\"message\":\"Too many attempts. Device locked.\"}");
+      } else {
+        StaticJsonDocument<128> rDoc;
+        rDoc["status"]       = "error";
+        rDoc["message"]      = "Wrong code";
+        rDoc["attemptsLeft"] = MAX_POP_ATTEMPTS - popAttempts;
+        String response;
+        serializeJson(rDoc, response);
+        bleNotify(bleCharPopVerify, response);
+      }
     }
   }
-}
+};
 
-void handleSetup() {
-  lastApActivity = millis();
+// ── WiFi Scan Callback ──
+// App writes {"action":"scan"} → device scans → notifies with results
+class WiFiScanCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) override {
+    bleLastActivity = millis();
+    String value = pCharacteristic->getValue().c_str();
 
-  if (!popVerified) {
-    sendJson(403, "{\"status\":\"error\",\"message\":\"Verification required first\"}");
-    return;
-  }
+    StaticJsonDocument<64> doc;
+    if (deserializeJson(doc, value)) {
+      bleNotify(bleCharWifiScan, "{\"status\":\"error\",\"message\":\"Invalid JSON\"}");
+      return;
+    }
 
-  if (!server.hasArg("plain")) {
-    sendJson(400, "{\"status\":\"error\",\"message\":\"No body\"}");
-    return;
-  }
+    String action = doc["action"] | "";
+    if (action != "scan") {
+      bleNotify(bleCharWifiScan, "{\"status\":\"error\",\"message\":\"Unknown action\"}");
+      return;
+    }
 
-  StaticJsonDocument<256> doc;
-  if (deserializeJson(doc, server.arg("plain"))) {
-    sendJson(400, "{\"status\":\"error\",\"message\":\"Invalid JSON\"}");
-    return;
-  }
+    if (!popVerified) {
+      bleNotify(bleCharWifiScan, "{\"status\":\"error\",\"message\":\"Verification required first\"}");
+      return;
+    }
 
-  String ssid = doc["ssid"] | "";
-  String pass = doc["password"] | "";
-  pairingUserId = doc["userId"] | "";
+    Serial.println("[BLE] WiFi scan requested...");
+    bleNotify(bleCharWifiScan, "{\"status\":\"scanning\"}");
 
-  if (ssid.length() == 0) {
-    sendJson(400, "{\"status\":\"error\",\"message\":\"SSID required\"}");
-    return;
-  }
-  // Input length validation (WiFi spec: SSID max 32, password max 63)
-  if (ssid.length() > 32) {
-    sendJson(400, "{\"status\":\"error\",\"message\":\"SSID too long (max 32)\"}");
-    return;
-  }
-  if (pass.length() > 63) {
-    sendJson(400, "{\"status\":\"error\",\"message\":\"Password too long (max 63)\"}");
-    return;
-  }
-  if (pairingUserId.length() > 64) {
-    sendJson(400, "{\"status\":\"error\",\"message\":\"userId too long (max 64)\"}");
-    return;
-  }
-
-  Serial.printf("[Setup] Trying WiFi: %s (AP+STA mode)\n", ssid.c_str());
-  saveWifiSettings(ssid, pass, pairingUserId);
-
-  // ──── جرب الاتصال بالواي فاي مع إبقاء الـ AP شغال (AP+STA) ────
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.begin(ssid.c_str(), pass.c_str());
-
-  uint32_t wifiStart = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 12000) {
+    // Perform WiFi scan (ESP32-C6 is 2.4GHz only — all results are 2.4GHz)
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
     delay(100);
-  }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    // ✅ الواي فاي اتصل بنجاح
-    Serial.printf("[Setup] WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    int n = WiFi.scanNetworks(false, false);  // sync scan, no hidden networks
+    Serial.printf("[BLE] Scan found %d networks\n", n);
 
-    StaticJsonDocument<128> rDoc;
-    rDoc["status"]       = "ok";
-    rDoc["message"]      = "Connected to WiFi!";
-    rDoc["serialNumber"] = SERIAL_NUMBER;
+    // Build JSON response with networks sorted by RSSI (strongest first)
+    // WiFi.scanNetworks already returns sorted by RSSI on ESP32
+    DynamicJsonDocument rDoc(4096);
+    rDoc["status"] = "ok";
+    rDoc["count"]  = n;
+    JsonArray networks = rDoc.createNestedArray("networks");
+
+    // Limit to 20 strongest networks (BLE transfer size constraint)
+    int limit = min(n, 20);
+    for (int i = 0; i < limit; i++) {
+      JsonObject net = networks.createNestedObject();
+      net["ssid"] = WiFi.SSID(i);
+      net["rssi"] = WiFi.RSSI(i);
+      // Auth type: 0=open, others=secured
+      net["secure"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    }
+
+    WiFi.scanDelete();
+    WiFi.mode(WIFI_MODE_NULL);  // Release WiFi radio back
+
     String response;
     serializeJson(rDoc, response);
-    sendJson(200, response);
+    bleNotify(bleCharWifiScan, response);
+    Serial.printf("[BLE] Scan results sent (%d bytes)\n", response.length());
+  }
+};
 
-    delay(500);
+// ── WiFi Config Callback ──
+// App writes {"ssid":"X","password":"Y"} → device connects → notifies result
+class WiFiConfigCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) override {
+    bleLastActivity = millis();
+    String value = pCharacteristic->getValue().c_str();
 
-    // أوقف الـ AP وحوّل لـ STA فقط
-    server.stop();
-    WiFi.softAPdisconnect(true);
+    if (!popVerified) {
+      bleNotify(bleCharWifiConfig, "{\"status\":\"error\",\"message\":\"Verification required first\"}");
+      return;
+    }
+
+    StaticJsonDocument<256> doc;
+    if (deserializeJson(doc, value)) {
+      bleNotify(bleCharWifiConfig, "{\"status\":\"error\",\"message\":\"Invalid JSON\"}");
+      return;
+    }
+
+    String ssid = doc["ssid"] | "";
+    String pass = doc["password"] | "";
+    pairingUserId = doc["userId"] | "";
+
+    if (ssid.length() == 0) {
+      bleNotify(bleCharWifiConfig, "{\"status\":\"error\",\"message\":\"SSID required\"}");
+      return;
+    }
+    if (ssid.length() > 32) {
+      bleNotify(bleCharWifiConfig, "{\"status\":\"error\",\"message\":\"SSID too long (max 32)\"}");
+      return;
+    }
+    if (pass.length() > 63) {
+      bleNotify(bleCharWifiConfig, "{\"status\":\"error\",\"message\":\"Password too long (max 63)\"}");
+      return;
+    }
+
+    Serial.printf("[BLE] WiFi config received: %s\n", ssid.c_str());
+    bleNotify(bleCharWifiConfig, "{\"status\":\"connecting\"}");
+    saveWifiSettings(ssid, pass, pairingUserId);
+
+    // Connect to WiFi (STA mode — BLE stays active during this)
     WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid.c_str(), pass.c_str());
 
-    // أكمل مع السيرفر
-    currentState = STATE_SERVER_INQUIRY;
-    int inqResult = inquireServer();
+    uint32_t wifiStart = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 12000) {
+      delay(100);
+    }
 
-    if (inqResult == INQUIRY_OWNED) {
-      Serial.println("[Setup] Device is owned by another user - ERROR");
-      currentState = STATE_ERROR;
-      setLED_error();
-    } else if (inqResult == INQUIRY_OK) {
-      Serial.println("[Setup] Inquiry OK! Connecting MQTT...");
-      currentState = STATE_MQTT_CONNECTING;
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("[BLE] WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
 
-      if (connectMQTT()) {
-        currentState = STATE_ONLINE;
-        setLED_online();
-        Serial.println("[Setup] Complete! Device is online.");
+      StaticJsonDocument<128> rDoc;
+      rDoc["status"]       = "ok";
+      rDoc["message"]      = "Connected to WiFi!";
+      rDoc["serialNumber"] = SERIAL_NUMBER;
+      String response;
+      serializeJson(rDoc, response);
+      bleNotify(bleCharWifiConfig, response);
+
+      // Give the app time to read the response before stopping BLE
+      delay(1000);
+
+      // Stop BLE and proceed to server inquiry
+      stopBLE();
+
+      currentState = STATE_SERVER_INQUIRY;
+      int inqResult = inquireServer();
+
+      if (inqResult == INQUIRY_OWNED) {
+        Serial.println("[BLE Setup] Device owned by another user - ERROR");
+        currentState = STATE_ERROR;
+        setLED_error();
+      } else if (inqResult == INQUIRY_OK) {
+        Serial.println("[BLE Setup] Inquiry OK! Connecting MQTT...");
+        currentState = STATE_MQTT_CONNECTING;
+
+        if (connectMQTT()) {
+          currentState = STATE_ONLINE;
+          setLED_online();
+          Serial.println("[BLE Setup] Complete! Device is online.");
+        } else {
+          currentState = STATE_ONLINE;
+          setLED_online();
+          Serial.println("[BLE Setup] MQTT failed - will retry in loop");
+        }
       } else {
-        currentState = STATE_ONLINE;
-        setLED_online();
-        Serial.println("[Setup] MQTT failed - will retry in loop");
+        Serial.println("[BLE Setup] Server inquiry failed");
+        currentState = STATE_ERROR;
+        setLED_error();
       }
     } else {
-      Serial.println("[Setup] Server inquiry failed - restarting AP");
-      currentState = STATE_ERROR;
-      delay(2000);
-      startAP();
+      Serial.println("[BLE] WiFi FAILED - notifying app");
+      WiFi.disconnect();
+      WiFi.mode(WIFI_MODE_NULL);
+
+      StaticJsonDocument<128> rDoc;
+      rDoc["status"]  = "wifi_error";
+      rDoc["message"] = "WiFi connection failed. Check your network name and password.";
+      String response;
+      serializeJson(rDoc, response);
+      bleNotify(bleCharWifiConfig, response);
+
+      // Stay in provisioning mode — user can retry
+      currentState = STATE_AP_ACTIVE;
+      bleLastActivity = millis();
     }
-  } else {
-    // ❌ الواي فاي فشل - أرسل رسالة خطأ للتطبيق (الـ AP لسا شغال)
-    Serial.println("[Setup] WiFi FAILED - notifying app");
-    WiFi.disconnect();
-    WiFi.mode(WIFI_AP);
-    WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET);
-
-    StaticJsonDocument<128> rDoc;
-    rDoc["status"]  = "wifi_error";
-    rDoc["message"] = "WiFi connection failed. Check your network name and password.";
-    String response;
-    serializeJson(rDoc, response);
-    sendJson(400, response);
-
-    // الـ AP لسا شغال — المستخدم يقدر يعيد المحاولة
-    currentState = STATE_AP_ACTIVE;
-    lastApActivity = millis();
   }
-}
-
-void handleStatus() {
-  lastApActivity = millis();
-
-  StaticJsonDocument<128> doc;
-  doc["state"]       = (int)currentState;
-  doc["popVerified"] = popVerified;
-
-  switch (currentState) {
-    case STATE_AP_ACTIVE:        doc["message"] = popVerified ? "Ready for WiFi config" : "Waiting for verification"; break;
-    case STATE_POP_VERIFIED:     doc["message"] = "Verified - send WiFi config"; break;
-    case STATE_WIFI_CONNECTING:  doc["message"] = "Connecting to WiFi..."; break;
-    case STATE_SERVER_INQUIRY:   doc["message"] = "Contacting server..."; break;
-    case STATE_MQTT_CONNECTING:  doc["message"] = "Connecting to MQTT..."; break;
-    case STATE_ONLINE:           doc["message"] = "Online"; break;
-    case STATE_OTA_UPDATING:     doc["message"] = "OTA update in progress"; break;
-    case STATE_ERROR:            doc["message"] = "Error occurred"; break;
-    default:                     doc["message"] = "Unknown"; break;
-  }
-
-  String response;
-  serializeJson(doc, response);
-  sendJson(200, response);
-}
-
-void handleCORS() {
-  server.sendHeader("Access-Control-Allow-Origin", "app://mnazilona");
-  server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  server.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  server.send(204);
-}
-
-void handleNotFound() {
-  sendJson(404, "{\"status\":\"error\",\"message\":\"Not found\"}");
-}
+};
 
 
 // ══════════════════════════════════════
-//            SOFTAP START / STOP
+//      BLE PROVISIONING START / STOP
+//  (replaces startAP / stopAP)
 // ══════════════════════════════════════
 
-void startAP() {
-  Serial.println("[AP] Starting SoftAP...");
+void startBLE() {
+  Serial.println("[BLE] Starting BLE provisioning...");
 
-  WiFi.mode(WIFI_AP);
-  WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET);
+  // BLE device name: MNZ_SN-001 (short for advertising)
+  String bleName = String(BLE_ADV_NAME_PREFIX) + String(SERIAL_NUMBER);
 
-  // Dynamic AP password: unique per device (derived from MAC)
-  // Format: "mnz-" + last 8 chars of MAC without colons (e.g. "mnz-A1B2C3D4")
-  if (apPassword.length() == 0) {
-    String mac = WiFi.macAddress();
-    mac.replace(":", "");
-    apPassword = "mnz-" + mac.substring(mac.length() - 8);
-  }
-  if (apSSID.length() == 0) {
-    apSSID = String(AP_SSID_PREFIX) + "_" + String(SERIAL_NUMBER);
-  }
+  BLEDevice::init(bleName.c_str());
+  // Request max MTU for larger JSON payloads
+  BLEDevice::setMTU(517);
 
-  WiFi.softAP(apSSID.c_str(), apPassword.c_str(), AP_CHANNEL, false, AP_MAX_CLIENTS);
+  bleServer = BLEDevice::createServer();
+  bleServer->setCallbacks(new BLEProvisioningServerCallbacks());
 
-  Serial.printf("[AP] SSID: %s\n", apSSID.c_str());
-  // Don't print password in production logs (security)
-  Serial.printf("[AP] Password length: %d chars\n", apPassword.length());
-  Serial.printf("[AP] IP: %s\n", WiFi.softAPIP().toString().c_str());
+  // Create provisioning service
+  BLEService* service = bleServer->createService(BLE_SERVICE_UUID);
 
-  server.on("/info",    HTTP_GET,  handleInfo);
-  server.on("/verify",  HTTP_POST, handleVerify);
-  server.on("/setup",   HTTP_POST, handleSetup);
-  server.on("/status",  HTTP_GET,  handleStatus);
+  // ── DeviceInfo (Read) ──
+  bleCharDeviceInfo = service->createCharacteristic(
+    BLE_CHAR_DEVICE_INFO,
+    BLECharacteristic::PROPERTY_READ
+  );
+  // Set device info JSON as static value
+  StaticJsonDocument<256> infoDoc;
+  infoDoc["serial"]      = SERIAL_NUMBER;
+  infoDoc["name"]        = DEVICE_NAME;
+  infoDoc["type"]        = "relay";
+  infoDoc["fw"]          = FIRMWARE_VERSION;
+  infoDoc["popRequired"] = !popVerified;
+  String infoJson;
+  serializeJson(infoDoc, infoJson);
+  bleCharDeviceInfo->setValue(infoJson.c_str());
 
-  server.on("/info",    HTTP_OPTIONS, handleCORS);
-  server.on("/verify",  HTTP_OPTIONS, handleCORS);
-  server.on("/setup",   HTTP_OPTIONS, handleCORS);
-  server.on("/status",  HTTP_OPTIONS, handleCORS);
+  // ── PoP Verify (Write + Notify) ──
+  bleCharPopVerify = service->createCharacteristic(
+    BLE_CHAR_POP_VERIFY,
+    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  bleCharPopVerify->addDescriptor(new BLE2902());
+  bleCharPopVerify->setCallbacks(new PopVerifyCallback());
 
-  server.onNotFound(handleNotFound);
-  server.begin();
+  // ── WiFi Scan (Write + Notify) ──
+  bleCharWifiScan = service->createCharacteristic(
+    BLE_CHAR_WIFI_SCAN,
+    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  bleCharWifiScan->addDescriptor(new BLE2902());
+  bleCharWifiScan->setCallbacks(new WiFiScanCallback());
 
-  apStartTime    = millis();
-  lastApActivity = millis();
-  currentState   = STATE_AP_ACTIVE;
-  Serial.println("[AP] HTTP Server ready");
+  // ── WiFi Config (Write + Notify) ──
+  bleCharWifiConfig = service->createCharacteristic(
+    BLE_CHAR_WIFI_CONFIG,
+    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  bleCharWifiConfig->addDescriptor(new BLE2902());
+  bleCharWifiConfig->setCallbacks(new WiFiConfigCallback());
+
+  // ── Status (Read + Notify) ──
+  bleCharStatus = service->createCharacteristic(
+    BLE_CHAR_STATUS,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  bleCharStatus->addDescriptor(new BLE2902());
+  bleCharStatus->setValue("{\"state\":1,\"message\":\"Waiting for verification\"}");
+
+  // Start service and advertising
+  service->start();
+
+  BLEAdvertising* advertising = BLEDevice::getAdvertising();
+  advertising->addServiceUUID(BLE_SERVICE_UUID);
+  advertising->setScanResponse(true);
+  // Helps with iPhone connection issues
+  advertising->setMinPreferred(0x06);
+  advertising->setMinPreferred(0x12);
+  BLEDevice::startAdvertising();
+
+  bleProvisioning   = true;
+  bleStartTime      = millis();
+  bleLastActivity   = millis();
+  currentState      = STATE_AP_ACTIVE;  // Reuse same state (means "awaiting provisioning")
+  Serial.printf("[BLE] Advertising as: %s\n", bleName.c_str());
+  Serial.println("[BLE] Provisioning service ready");
 }
 
-void stopAP() {
-  server.stop();
-  WiFi.softAPdisconnect(true);
-  Serial.println("[AP] Stopped");
+void stopBLE() {
+  if (!bleProvisioning) return;
+  bleProvisioning = false;
+  bleClientConnected = false;
+  BLEDevice::getAdvertising()->stop();
+  // Deinit frees all BLE memory (~70KB) back to heap
+  BLEDevice::deinit(true);
+  bleServer = nullptr;
+  Serial.println("[BLE] Provisioning stopped, memory freed");
 }
+
+// Legacy aliases — kept so the rest of the firmware compiles unchanged
+void startAP() { startBLE(); }
+void stopAP()  { stopBLE();  }
 
 
 // ══════════════════════════════════════
@@ -2202,16 +2319,16 @@ void handleStateMachine() {
 
     case STATE_AP_ACTIVE:
     case STATE_POP_VERIFIED:
-      server.handleClient();
+      // BLE provisioning: no handleClient needed — BLE callbacks handle everything
       blinkLED();
 
-      if (millis() - lastApActivity > AP_TIMEOUT_MS) {
-        Serial.println("[AP] Timeout - no activity");
+      if (bleProvisioning && millis() - bleLastActivity > BLE_TIMEOUT_MS) {
+        Serial.println("[BLE] Timeout - no activity");
         if (storedSSID.length() > 0) {
-          stopAP();
+          stopBLE();
           currentState = STATE_WIFI_RECONNECTING;
         } else {
-          lastApActivity = millis();
+          bleLastActivity = millis();  // Keep advertising indefinitely if no saved WiFi
         }
       }
       break;
@@ -2288,7 +2405,6 @@ void handleStateMachine() {
       break;
 
     case STATE_ERROR:
-      server.handleClient();
       blinkLED();
       break;
 
@@ -2380,16 +2496,10 @@ void setup() {
     }
   }
 
-  // MAC Address
+  // MAC Address (needed for logging)
   WiFi.mode(WIFI_STA);
   String macAddr = WiFi.macAddress();
   WiFi.mode(WIFI_MODE_NULL);
-
-  // Build dynamic AP credentials from MAC
-  String macClean = macAddr;
-  macClean.replace(":", "");
-  apPassword = "mnz-" + macClean.substring(macClean.length() - 8);
-  apSSID = String(AP_SSID_PREFIX) + "_" + String(SERIAL_NUMBER);
 
   Serial.println("\n======================================");
   Serial.printf("  Mnazilona IoT - %s\n", DEVICE_NAME);
@@ -2397,6 +2507,7 @@ void setup() {
   Serial.printf("  FW:  %s\n", FIRMWARE_VERSION);
   Serial.printf("  MAC: %s\n", macAddr.c_str());
   Serial.println("  Mode: Garage Relay (Pulse)");
+  Serial.println("  Provisioning: BLE");
   Serial.printf("  TLS: %s\n", strlen(ca_cert) > 60 ? "Enabled" : "Insecure (dev)");
   Serial.printf("  OTA Signing: %s\n", strlen(ota_public_key) > 60 ? "Enabled" : "Disabled");
   Serial.println("======================================\n");
@@ -2436,8 +2547,8 @@ void setup() {
       setLED_offline();
     }
   } else {
-    Serial.println("[Boot] No settings - starting SoftAP");
-    startAP();
+    Serial.println("[Boot] No settings - starting BLE provisioning");
+    startBLE();
   }
 }
 
