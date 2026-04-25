@@ -35,6 +35,7 @@
 #include <mbedtls/sha256.h>
 #include <mbedtls/base64.h>
 #include <esp_task_wdt.h>
+#include <esp_log.h>
 #include <time.h>
 
 // ═══════════════════════════════════════
@@ -68,6 +69,12 @@ bool               bleProvisioning    = false;  // true when BLE provisioning is
 uint32_t           bleStartTime       = 0;
 uint32_t           bleLastActivity    = 0;
 
+// Set by WiFiConfigCallback after WiFi succeeds. Main loop picks it up to run
+// stopBLE() + inquireServer() + connectMQTT() outside NimBLE host task —
+// running heavy/blocking work inside a BLE callback deadlocks NimBLE on ESP32-C6.
+volatile bool      wifiProvisionedFlag = false;
+uint32_t           wifiProvisionedAt   = 0;
+
 // BLE chunked transfer buffer (for WiFi scan results that exceed MTU)
 String             bleScanResultBuffer = "";
 int                bleScanChunkIndex   = 0;
@@ -100,22 +107,16 @@ String popCode      = "";
 #define SERVER_OTA_CHECK_PATH "/devices/ota/check"
 
 // TLS: Root CA certificate for server & MQTT broker verification
-// Replace with your actual CA cert (Let's Encrypt, etc.)
-// Set to "" to use setInsecure() for development ONLY
-const char* ca_cert = R"EOF(
------BEGIN CERTIFICATE-----
-PASTE_YOUR_CA_CERTIFICATE_HERE
------END CERTIFICATE-----
-)EOF";
+// Empty in dev mode → setInsecure() is used. For production, paste a real
+// Let's Encrypt / your CA chain here (length must exceed 60 to activate).
+const char* ca_cert = "";
 
 // OTA: RSA public key for firmware signature verification
-// Generate keypair: openssl genrsa -out ota_private.pem 2048
-//                   openssl rsa -in ota_private.pem -pubout -out ota_public.pem
-const char* ota_public_key = R"EOF(
------BEGIN PUBLIC KEY-----
-PASTE_YOUR_OTA_PUBLIC_KEY_HERE
------END PUBLIC KEY-----
-)EOF";
+// Empty in dev mode → signature check skipped. For production, generate keypair:
+//   openssl genrsa -out ota_private.pem 2048
+//   openssl rsa -in ota_private.pem -pubout -out ota_public.pem
+// then paste the public key here (length must exceed 60 to activate).
+const char* ota_public_key = "";
 
 // ═══════════════════════════════════════
 // SoftAP Settings (LEGACY — no longer used for provisioning)
@@ -245,6 +246,7 @@ bool popLockedOut          = false;
 
 // TLS-secured clients
 WiFiClientSecure wifiSecureClient;
+WiFiClient       wifiPlainClient;   // for plain HTTP (dev/local server)
 PubSubClient mqttClient(wifiSecureClient);
 WebServer server(80);
 WebServer localServer(8080);  // Local API server (runs when online)
@@ -718,7 +720,10 @@ int inquireServer() {
   HTTPClient http;
 
   String inquiryUrl = String(SERVER_BASE_URL) + SERVER_INQUIRY_PATH;
-  if (!http.begin(wifiSecureClient, inquiryUrl)) return INQUIRY_FAIL;
+  bool isHttps = inquiryUrl.startsWith("https://");
+  bool ok = isHttps ? http.begin(wifiSecureClient, inquiryUrl)
+                    : http.begin(wifiPlainClient,  inquiryUrl);
+  if (!ok) return INQUIRY_FAIL;
 
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(10000);
@@ -896,7 +901,11 @@ void checkForOtaUpdate() {
   HTTPClient http;
   String checkUrl = String(SERVER_BASE_URL) + SERVER_OTA_CHECK_PATH;
 
-  http.begin(wifiSecureClient, checkUrl);
+  if (checkUrl.startsWith("https://")) {
+    http.begin(wifiSecureClient, checkUrl);
+  } else {
+    http.begin(wifiPlainClient, checkUrl);
+  }
   http.addHeader("X-Device-Serial", SERIAL_NUMBER);
   http.addHeader("X-Device-Secret", deviceSecret);
   http.addHeader("X-Firmware-Version", FIRMWARE_VERSION);
@@ -1532,12 +1541,22 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 bool connectMQTT() {
   if (mqttHost.length() == 0 || mqttUser.length() == 0) return false;
 
+  // Pick TCP transport based on port: 1883 = plain MQTT (dev/local),
+  // anything else = TLS. PubSubClient::setClient lets us swap at runtime.
+  bool useTls = (mqttPort != 1883);
+  if (useTls) {
+    mqttClient.setClient(wifiSecureClient);
+  } else {
+    mqttClient.setClient(wifiPlainClient);
+  }
+
   mqttClient.setServer(mqttHost.c_str(), mqttPort);
   mqttClient.setCallback(mqttCallback);
   mqttClient.setBufferSize(1024);
 
   String cid = String(SERIAL_NUMBER) + "-" + String(random(0xFFFF), HEX);
-  Serial.printf("[MQTT] Connecting to %s:%d...\n", mqttHost.c_str(), mqttPort);
+  Serial.printf("[MQTT] Connecting to %s:%d (%s)...\n",
+                mqttHost.c_str(), mqttPort, useTls ? "TLS" : "plain");
 
   if (mqttClient.connect(cid.c_str(), mqttUser.c_str(), mqttPass.c_str(),
                           topicOf("status").c_str(), 1, true, "offline")) {
@@ -2118,38 +2137,12 @@ class WiFiConfigCallback : public BLECharacteristicCallbacks {
       serializeJson(rDoc, response);
       bleNotify(bleCharWifiConfig, response);
 
-      // Give the app time to read the response before stopping BLE
-      delay(1000);
-
-      // Stop BLE FIRST — ESP32-C6 shares radio between BLE and WiFi
-      // HTTP requests will fail if BLE is still active
-      stopBLE();
-
-      currentState = STATE_SERVER_INQUIRY;
-      int inqResult = inquireServer();
-
-      if (inqResult == INQUIRY_OWNED) {
-        Serial.println("[BLE Setup] Device owned by another user - ERROR");
-        currentState = STATE_ERROR;
-        setLED_error();
-      } else if (inqResult == INQUIRY_OK) {
-        Serial.println("[BLE Setup] Inquiry OK! Connecting MQTT...");
-        currentState = STATE_MQTT_CONNECTING;
-
-        if (connectMQTT()) {
-          currentState = STATE_ONLINE;
-          setLED_online();
-          Serial.println("[BLE Setup] Complete! Device is online.");
-        } else {
-          currentState = STATE_ONLINE;
-          setLED_online();
-          Serial.println("[BLE Setup] MQTT failed - will retry in loop");
-        }
-      } else {
-        Serial.println("[BLE Setup] Server inquiry failed");
-        currentState = STATE_ERROR;
-        setLED_error();
-      }
+      // Defer stopBLE/inquireServer/connectMQTT to main loop.
+      // Running them here (NimBLE host task) deadlocks NimBLE on ESP32-C6.
+      currentState        = STATE_SERVER_INQUIRY;
+      wifiProvisionedAt   = millis();
+      wifiProvisionedFlag = true;
+      return;
     } else {
       Serial.println("[BLE] WiFi FAILED - notifying app");
       WiFi.disconnect();
@@ -2277,17 +2270,23 @@ void stopBLE() {
 
   BLEDevice::getAdvertising()->stop();
 
-  // Wait for client disconnect to complete before deinit.
-  // The app sends BLE disconnect right after receiving "ok" — this delay
-  // lets NimBLE finish processing it, avoiding rc=514 on ESP32-C6 shared radio.
-  if (bleClientConnected) {
+  // Server-initiated disconnect for any still-connected peers, otherwise
+  // NimBLE's internal cleanup races with deinit and prints rc=514 on ESP32-C6.
+  if (bleClientConnected && bleServer != nullptr) {
+    auto peers = bleServer->getPeerDevices(true);
+    for (auto& p : peers) {
+      bleServer->disconnect(p.first);
+    }
     uint32_t waitStart = millis();
-    while (bleClientConnected && millis() - waitStart < 2000) {
+    while (bleClientConnected && millis() - waitStart < 1500) {
       delay(50);
     }
   }
-
   bleClientConnected = false;
+
+  // Let NimBLE host task finish processing the disconnect HCI events
+  delay(300);
+
   // Deinit frees all BLE memory (~70KB) back to heap
   BLEDevice::deinit(true);
   bleServer = nullptr;
@@ -2346,6 +2345,42 @@ void handleButton() {
 // ══════════════════════════════════════
 
 void handleStateMachine() {
+  // BLE provisioning handoff — runs in main loop task (not NimBLE callback)
+  // so heavy/blocking work (BLE deinit, HTTPS, MQTT) is safe here.
+  if (wifiProvisionedFlag) {
+    wifiProvisionedFlag = false;
+
+    // Give the app ~800ms after our "ok" notify to read it and disconnect itself
+    uint32_t since = millis() - wifiProvisionedAt;
+    if (since < 800) delay(800 - since);
+
+    Serial.println("[Provision] Stopping BLE...");
+    stopBLE();
+    delay(200);  // radio settling
+
+    Serial.println("[Provision] Inquiring server...");
+    int inqResult = inquireServer();
+
+    if (inqResult == INQUIRY_OWNED) {
+      Serial.println("[Provision] Device owned by another user - ERROR");
+      currentState = STATE_ERROR;
+      setLED_error();
+    } else if (inqResult == INQUIRY_OK) {
+      Serial.println("[Provision] Inquiry OK! Connecting MQTT...");
+      currentState = STATE_MQTT_CONNECTING;
+      bool ok = connectMQTT();
+      currentState = STATE_ONLINE;
+      setLED_online();
+      Serial.println(ok ? "[Provision] Complete! Device is online."
+                        : "[Provision] MQTT failed - will retry in loop");
+    } else {
+      Serial.println("[Provision] Server inquiry failed");
+      currentState = STATE_ERROR;
+      setLED_error();
+    }
+    return;
+  }
+
   switch (currentState) {
 
     case STATE_AP_ACTIVE:
@@ -2362,6 +2397,12 @@ void handleStateMachine() {
           bleLastActivity = millis();  // Keep advertising indefinitely if no saved WiFi
         }
       }
+      break;
+
+    case STATE_SERVER_INQUIRY:
+    case STATE_MQTT_CONNECTING:
+      // Transient states during provisioning — keep LED blinking yellow
+      blinkLED();
       break;
 
     case STATE_ONLINE:
@@ -2461,6 +2502,10 @@ void setup() {
 
   Serial.begin(115200);
   delay(1000);
+
+  // Suppress cosmetic NimBLE shutdown warnings (rc=514 etc.) — actual errors
+  // still surface via Serial.println in our own BLE code.
+  esp_log_level_set("NimBLE", ESP_LOG_WARN);
 
   // ═══════════════════════════════════════
   // HARDWARE WATCHDOG TIMER
