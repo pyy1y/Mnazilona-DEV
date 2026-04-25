@@ -3,6 +3,8 @@ const IPBlacklist = require('../models/IPBlacklist');
 const { emitToAdmins } = require('../config/socket');
 const { forceRefreshBlacklist } = require('../middleware/ipBlacklist');
 
+const ANOMALY_DISABLED = process.env.DISABLE_ANOMALY_DETECTOR === 'true';
+
 // In-memory tracking windows
 const trackers = {
   failedLogins: new Map(),    // ip -> { count, firstAt }
@@ -248,11 +250,22 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-module.exports = {
-  trackFailedLogin,
-  trackFailedOtp,
-  trackDeviceCommand,
-  trackEndpointAccess,
-  trackAdminAction,
-  trackPairAttempt,
-};
+const noop = () => {};
+
+module.exports = ANOMALY_DISABLED
+  ? {
+      trackFailedLogin: noop,
+      trackFailedOtp: noop,
+      trackDeviceCommand: noop,
+      trackEndpointAccess: noop,
+      trackAdminAction: noop,
+      trackPairAttempt: noop,
+    }
+  : {
+      trackFailedLogin,
+      trackFailedOtp,
+      trackDeviceCommand,
+      trackEndpointAccess,
+      trackAdminAction,
+      trackPairAttempt,
+    };

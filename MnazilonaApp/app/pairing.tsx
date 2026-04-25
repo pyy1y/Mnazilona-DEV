@@ -152,8 +152,8 @@ export default function PairingScreen() {
     const { success, data } = await ble.verifyPopCode(popCode);
 
     if (success) {
-      // Save the derived token as deviceSecret for backend pairing
-      const secret = data.popToken || data.deviceSecret || data.device_secret || data.secret;
+      // The device returns the real deviceSecret after PoP verification
+      const secret = data.deviceSecret || data.device_secret || data.secret;
       if (secret) {
         setDeviceSecretSynced(secret);
         if (__DEV__) console.log("[Pairing] Got deviceSecret from verify");
@@ -225,12 +225,14 @@ export default function PairingScreen() {
     if (success) {
       if (__DEV__) console.log("[Pairing] WiFi config sent — device connected!");
       // Device will stop BLE, connect to WiFi, do server inquiry
-      // We can disconnect BLE now (device already stopped it)
       await ble.disconnect();
 
       setStatusText("Waiting for device to register...");
-      // Give device time to do server inquiry + MQTT connect
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      // ESP32-C6 shares radio between BLE and WiFi — after responding "ok",
+      // it still needs to: delay(1000) + stopBLE/deinit + inquireServer (HTTP).
+      // The NimBLE deinit can take 3-5s on C6, then the HTTP inquiry ~2-5s.
+      // 12s initial wait gives the device enough time to complete server inquiry.
+      await new Promise(resolve => setTimeout(resolve, 12000));
 
       pairWithServer(0);
     } else if (data.status === "wifi_error") {
@@ -253,7 +255,7 @@ export default function PairingScreen() {
   // (Unchanged from AP version — same backend flow)
   // ═══════════════════════════════════════
   const pairWithServer = async (attempt: number) => {
-    const MAX_ATTEMPTS = 7;
+    const MAX_ATTEMPTS = 10;
     setStep("pairing");
     setStatusText(`Linking device to your account... (${attempt + 1}/${MAX_ATTEMPTS})`);
 

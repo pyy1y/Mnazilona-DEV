@@ -86,8 +86,8 @@ int                bleScanChunkIndex   = 0;
 // استخدم أمر Provisioning لحرقها - لا تكتبها في الكود!
 // DEVICE_SECRET: مفتاح هوية الجهاز (32 حرف hex)
 // POP_CODE: رمز إثبات الحيازة (8+ حروف/أرقام، يُطبع على ملصق الجهاز)
-String deviceSecret = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
-String popCode      = "123456";
+String deviceSecret = "";
+String popCode      = "";
 
 // ═══════════════════════════════════════
 // SERVER & TLS CONFIG
@@ -165,6 +165,9 @@ PASTE_YOUR_OTA_PUBLIC_KEY_HERE
 
 bool ntpSynced = false;
 
+// Forward declaration
+void addLog(const char* msg, const char* type = "info");
+
 // Get current epoch time (0 if not synced)
 uint32_t getEpochTime() {
   struct tm timeinfo;
@@ -204,7 +207,7 @@ LocalLog localLogs[MAX_LOCAL_LOGS];
 int logHead = 0;
 int logCount = 0;
 
-void addLog(const char* msg, const char* type = "info") {
+void addLog(const char* msg, const char* type) {
   LocalLog& entry = localLogs[logHead];
   entry.timestamp = millis();
   strncpy(entry.message, msg, sizeof(entry.message) - 1);
@@ -1634,7 +1637,8 @@ bool connectMQTT() {
 bool verifyLocalAuth() {
   if (mqttToken.length() == 0) return true;  // No token set = dev mode (allow all)
 
-  localServer.collectHeaders("Authorization");
+  const char* authHeaderKeys[] = {"Authorization"};
+  localServer.collectHeaders(authHeaderKeys, 1);
   String authHeader = localServer.header("Authorization");
 
   if (authHeader.length() == 0 || !authHeader.startsWith("Bearer ")) {
@@ -1961,11 +1965,12 @@ class PopVerifyCallback : public BLECharacteristicCallbacks {
       resetPopAttempts();
       currentState = STATE_POP_VERIFIED;
 
-      String popToken = generatePopToken();
+      // Send the real deviceSecret so the app can authenticate with the backend
+      // PoP already proved physical access; BLE link is encrypted
       StaticJsonDocument<256> rDoc;
-      rDoc["status"]   = "ok";
-      rDoc["message"]  = "Verified";
-      rDoc["popToken"] = popToken;
+      rDoc["status"]        = "ok";
+      rDoc["message"]       = "Verified";
+      rDoc["deviceSecret"]  = deviceSecret;
       String response;
       serializeJson(rDoc, response);
       bleNotify(bleCharPopVerify, response);
@@ -2116,7 +2121,8 @@ class WiFiConfigCallback : public BLECharacteristicCallbacks {
       // Give the app time to read the response before stopping BLE
       delay(1000);
 
-      // Stop BLE and proceed to server inquiry
+      // Stop BLE FIRST — ESP32-C6 shares radio between BLE and WiFi
+      // HTTP requests will fail if BLE is still active
       stopBLE();
 
       currentState = STATE_SERVER_INQUIRY;
@@ -2183,7 +2189,8 @@ void startBLE() {
   bleServer->setCallbacks(new BLEProvisioningServerCallbacks());
 
   // Create provisioning service
-  BLEService* service = bleServer->createService(BLE_SERVICE_UUID);
+  // 5 characteristics + 4 BLE2902 descriptors = need ~30 handles
+  BLEService* service = bleServer->createService(BLEUUID(BLE_SERVICE_UUID), 30);
 
   // ── DeviceInfo (Read) ──
   bleCharDeviceInfo = service->createCharacteristic(
@@ -2237,11 +2244,23 @@ void startBLE() {
   service->start();
 
   BLEAdvertising* advertising = BLEDevice::getAdvertising();
-  advertising->addServiceUUID(BLE_SERVICE_UUID);
-  advertising->setScanResponse(true);
-  // Helps with iPhone connection issues
-  advertising->setMinPreferred(0x06);
-  advertising->setMinPreferred(0x12);
+
+  // Explicitly split advertising data between adv packet and scan response.
+  // A 128-bit UUID (18 bytes) + flags (3 bytes) = 21 bytes, leaving only
+  // 10 bytes in the 31-byte adv packet — not enough for "MNZ_SN-001" (12 bytes).
+  // Solution: put UUID in the adv packet, device name in scan response.
+  BLEAdvertisementData advData;
+  advData.setFlags(ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT);
+  advData.setCompleteServices(BLEUUID(BLE_SERVICE_UUID));
+
+  BLEAdvertisementData scanResponseData;
+  scanResponseData.setName(bleName.c_str());
+
+  advertising->setAdvertisementData(advData);
+  advertising->setScanResponseData(scanResponseData);
+  // Connection interval hints for iOS compatibility
+  advertising->setMinPreferred(0x06);  // 7.5ms min
+  advertising->setMaxPreferred(0x12);  // 22.5ms max
   BLEDevice::startAdvertising();
 
   bleProvisioning   = true;
@@ -2255,8 +2274,20 @@ void startBLE() {
 void stopBLE() {
   if (!bleProvisioning) return;
   bleProvisioning = false;
-  bleClientConnected = false;
+
   BLEDevice::getAdvertising()->stop();
+
+  // Wait for client disconnect to complete before deinit.
+  // The app sends BLE disconnect right after receiving "ok" — this delay
+  // lets NimBLE finish processing it, avoiding rc=514 on ESP32-C6 shared radio.
+  if (bleClientConnected) {
+    uint32_t waitStart = millis();
+    while (bleClientConnected && millis() - waitStart < 2000) {
+      delay(50);
+    }
+  }
+
+  bleClientConnected = false;
   // Deinit frees all BLE memory (~70KB) back to heap
   BLEDevice::deinit(true);
   bleServer = nullptr;
@@ -2435,7 +2466,12 @@ void setup() {
   // HARDWARE WATCHDOG TIMER
   // Resets the device if loop() hangs for > WDT_TIMEOUT_SEC seconds
   // ═══════════════════════════════════════
-  esp_task_wdt_init(WDT_TIMEOUT_SEC, true);  // true = panic (reset) on timeout
+  esp_task_wdt_config_t wdt_config = {
+    .timeout_ms = WDT_TIMEOUT_SEC * 1000,
+    .idle_core_mask = 0,
+    .trigger_panic = true
+  };
+  esp_task_wdt_init(&wdt_config);
   esp_task_wdt_add(NULL);                    // Add current task (loopTask)
   Serial.println("[WDT] Watchdog timer initialized (30s)");
 

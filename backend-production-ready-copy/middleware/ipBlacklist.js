@@ -1,5 +1,7 @@
 const IPBlacklist = require('../models/IPBlacklist');
 
+const IP_BLACKLIST_DISABLED = process.env.DISABLE_IP_BLACKLIST === 'true';
+
 // In-memory cache for fast lookups (refreshed periodically)
 let blacklistCache = new Set();
 let lastRefresh = 0;
@@ -27,6 +29,8 @@ const refreshCache = async () => {
 refreshCache();
 
 const ipBlacklistMiddleware = async (req, res, next) => {
+  if (IP_BLACKLIST_DISABLED) return next();
+
   // Refresh cache if stale
   if (Date.now() - lastRefresh > CACHE_TTL) {
     refreshCache(); // Non-blocking refresh

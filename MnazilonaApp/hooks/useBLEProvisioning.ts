@@ -145,34 +145,51 @@ export function useBLEProvisioning() {
 
     const seen = new Map<string, DiscoveredDevice>();
 
-    manager.startDeviceScan(
-      [SERVICE_UUID],  // Filter by our service UUID — only Mnazilona devices
-      { allowDuplicates: false },
-      (err: BleError | null, device: Device | null) => {
-        if (err) {
-          if (__DEV__) console.log("[BLE] Scan error:", err.message);
-          // Don't set error for non-critical scan issues
-          return;
-        }
-        if (!device || !device.name) return;
-        if (!device.name.startsWith(BLE_NAME_PREFIX)) return;
-
-        const serialNumber = device.name.substring(BLE_NAME_PREFIX.length);
-        const entry: DiscoveredDevice = {
-          id: device.id,
-          name: device.name,
-          rssi: device.rssi ?? -100,
-          serialNumber,
-        };
-        seen.set(device.id, entry);
-        // Sort by signal strength (strongest first)
-        const sorted = Array.from(seen.values()).sort((a, b) => b.rssi - a.rssi);
-        setDiscoveredDevices(sorted);
+    const scanCallback = (err: BleError | null, device: Device | null) => {
+      if (err) {
+        if (__DEV__) console.log("[BLE] Scan error:", err.message);
+        return;
       }
+      if (!device) return;
+
+      // Use localName (from advertising data) with fallback to name (cached/GAP)
+      // On iOS especially, name can be null while localName has the correct value
+      const deviceName = device.localName || device.name;
+      if (!deviceName) return;
+      if (!deviceName.startsWith(BLE_NAME_PREFIX)) return;
+
+      const serialNumber = deviceName.substring(BLE_NAME_PREFIX.length);
+      const entry: DiscoveredDevice = {
+        id: device.id,
+        name: deviceName,
+        rssi: device.rssi ?? -100,
+        serialNumber,
+      };
+      seen.set(device.id, entry);
+      const sorted = Array.from(seen.values()).sort((a, b) => b.rssi - a.rssi);
+      setDiscoveredDevices(sorted);
+    };
+
+    // First try scanning with service UUID filter for faster results.
+    // If no devices found after 4s, restart scan without UUID filter
+    // (128-bit custom UUIDs may not appear in iOS advertisement packets).
+    manager.startDeviceScan(
+      [SERVICE_UUID],
+      { allowDuplicates: false },
+      scanCallback
     );
+
+    const fallbackTimer = setTimeout(() => {
+      if (seen.size === 0) {
+        if (__DEV__) console.log("[BLE] No devices via UUID filter — retrying without filter");
+        manager.stopDeviceScan();
+        manager.startDeviceScan(null, { allowDuplicates: false }, scanCallback);
+      }
+    }, 4000);
 
     // Auto-stop after duration
     setTimeout(() => {
+      clearTimeout(fallbackTimer);
       manager.stopDeviceScan();
       setBleState((prev) => (prev === "scanning" ? "idle" : prev));
     }, durationMs);
