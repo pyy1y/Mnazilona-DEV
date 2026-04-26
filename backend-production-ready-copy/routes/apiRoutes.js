@@ -6,6 +6,7 @@ const { otpSendLimiter, otpVerifyLimiter, strictLimiter, apiLimiter } = require(
 
 // Profile Routes
 router.get('/me', auth, userController.getProfile);
+router.patch('/me', auth, apiLimiter, userController.updateProfile);
 router.put('/me', auth, apiLimiter, userController.updateProfile);
 
 // Change Email Routes

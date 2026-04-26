@@ -48,10 +48,10 @@ npm start
 |---|---|
 | `GET /health` | Health check (DB + MQTT status) |
 | `POST /auth/*` | Authentication (register, login, password) |
-| `GET/PUT /api/me` | User profile |
+| `GET/PATCH/PUT /api/me` | User profile |
 | `POST /api/account/*` | Email change, account deletion |
 | `GET/POST /devices/*` | Device management, pairing, commands |
-| `GET/PATCH /notifications/*` | Notifications and transfer requests |
+| `GET/PATCH /notifications*` | Notifications and transfer requests |
 | `GET/POST/PATCH/DELETE /rooms/*` | Room management |
 | `POST /admin/*` | Admin device management (requires admin role) |
 

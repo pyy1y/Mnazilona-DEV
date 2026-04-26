@@ -20,11 +20,11 @@ import React, { useState, useRef, useEffect } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput, Alert,
   ActivityIndicator, KeyboardAvoidingView, ScrollView, Platform,
-  FlatList,
 } from "react-native";
 import { useRouter } from "expo-router";
 import { API_URL, ENDPOINTS } from "../constants/api";
 import { TokenManager } from "../utils/api";
+import { createRequestId } from "../utils/requestId";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import {
   useBLEProvisioning,
@@ -67,12 +67,11 @@ export default function PairingScreen() {
   const [serialNumber, _setSerialNumber] = useState("");
   const [deviceName, setDeviceName] = useState("");
 
-  // deviceSecret from the PoP verify response (popToken)
-  const [deviceSecret, _setDeviceSecret] = useState("");
-
   // Refs for async chain safety
   const serialNumberRef = useRef("");
   const deviceSecretRef = useRef("");
+  const pairRequestIdRef = useRef("");
+  const scanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const setSerialNumberSynced = (value: string) => {
     serialNumberRef.current = value;
@@ -80,20 +79,24 @@ export default function PairingScreen() {
   };
   const setDeviceSecretSynced = (value: string) => {
     deviceSecretRef.current = value;
-    _setDeviceSecret(value);
   };
 
   // Cleanup BLE on unmount
   useEffect(() => {
+    const disconnectBle = ble.disconnect;
     return () => {
-      ble.disconnect();
+      if (scanTimeoutRef.current) {
+        clearTimeout(scanTimeoutRef.current);
+      }
+      void disconnectBle();
     };
-  }, []);
+  }, [ble.disconnect]);
 
   // ═══════════════════════════════════════
   // Step 1: Scan for BLE Devices
   // ═══════════════════════════════════════
   const startBLEScan = async () => {
+    pairRequestIdRef.current = "";
     setStep("scan_devices");
     setLoading(true);
     setStatusText("Scanning for nearby devices...");
@@ -103,9 +106,13 @@ export default function PairingScreen() {
 
     // Scanning runs in background via the hook — devices appear reactively
     // After scan duration, loading stops
-    setTimeout(() => {
+    if (scanTimeoutRef.current) {
+      clearTimeout(scanTimeoutRef.current);
+    }
+    scanTimeoutRef.current = setTimeout(() => {
       setLoading(false);
       setStatusText("");
+      scanTimeoutRef.current = null;
     }, 12500);
   };
 
@@ -114,6 +121,7 @@ export default function PairingScreen() {
   // ═══════════════════════════════════════
   const connectToDevice = async (device: DiscoveredDevice) => {
     ble.stopScan();
+    pairRequestIdRef.current = "";
     setStep("connecting_ble");
     setLoading(true);
     setStatusText(`Connecting to ${device.name}...`);
@@ -234,7 +242,8 @@ export default function PairingScreen() {
       // 12s initial wait gives the device enough time to complete server inquiry.
       await new Promise(resolve => setTimeout(resolve, 12000));
 
-      pairWithServer(0);
+      pairRequestIdRef.current = createRequestId("pair");
+      await pairWithServer(0);
     } else if (data.status === "wifi_error") {
       setLoading(false);
       Alert.alert(
@@ -256,15 +265,20 @@ export default function PairingScreen() {
   // ═══════════════════════════════════════
   const pairWithServer = async (attempt: number) => {
     const MAX_ATTEMPTS = 10;
+    if (!pairRequestIdRef.current) {
+      pairRequestIdRef.current = createRequestId("pair");
+    }
     setStep("pairing");
     setStatusText(`Linking device to your account... (${attempt + 1}/${MAX_ATTEMPTS})`);
 
     try {
       const sn = serialNumberRef.current;
       const secret = deviceSecretRef.current;
+      const requestId = pairRequestIdRef.current;
 
       if (!sn) {
         if (__DEV__) console.error("[Pairing] No serial number in ref!");
+        pairRequestIdRef.current = "";
         setStep("error");
         setErrorText("No serial number found. Please restart the setup.");
         setLoading(false);
@@ -274,6 +288,7 @@ export default function PairingScreen() {
       const token = await TokenManager.get();
       if (!token) {
         if (__DEV__) console.error("[Pairing] No auth token found!");
+        pairRequestIdRef.current = "";
         setStep("error");
         setErrorText("Session expired. Please log in again and retry.");
         setLoading(false);
@@ -297,12 +312,13 @@ export default function PairingScreen() {
         body: JSON.stringify({
           serialNumber: sn,
           deviceSecret: secret,
+          requestId,
         }),
         signal: pairController.signal,
       });
       clearTimeout(pairTimeout);
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (__DEV__) console.log(`[Pairing] Response: ${res.status}`, JSON.stringify(data));
 
       if (res.ok) {
@@ -316,6 +332,7 @@ export default function PairingScreen() {
       }
 
       if (res.status === 409) {
+        pairRequestIdRef.current = "";
         setStep("error");
         setLoading(false);
         setErrorText(
@@ -332,6 +349,7 @@ export default function PairingScreen() {
 
       if (res.status === 400) {
         if (__DEV__) console.error("[Pairing] Bad request:", data.message);
+        pairRequestIdRef.current = "";
         setStep("error");
         setLoading(false);
         setErrorText("Setup incomplete. Please restart the setup process.");
@@ -340,6 +358,7 @@ export default function PairingScreen() {
 
       if (res.status === 401) {
         if (__DEV__) console.error("[Pairing] Auth failed:", data.code || data.error);
+        pairRequestIdRef.current = "";
         setStep("error");
         setLoading(false);
         setErrorText("Session expired. Please log in again and retry.");
@@ -348,6 +367,7 @@ export default function PairingScreen() {
 
       if (res.status === 403) {
         if (__DEV__) console.error("[Pairing] Forbidden:", data.message);
+        pairRequestIdRef.current = "";
         setStep("error");
         setLoading(false);
         setErrorText("Device verification failed. Please try the setup process again.");
@@ -363,9 +383,13 @@ export default function PairingScreen() {
         const delay = Math.min(3000 * Math.pow(1.5, attempt), 15000);
         setTimeout(() => pairWithServer(attempt + 1), delay);
       } else {
+        pairRequestIdRef.current = "";
         setLoading(false);
-        setStep("done");
-        setStatusText("Device configured! It may take a moment to appear in your dashboard.");
+        setStep("error");
+        setStatusText("");
+        setErrorText(
+          "The device connected, but the app could not confirm pairing with the server. Please try again from the dashboard once the device is online."
+        );
       }
     }
   };
@@ -390,20 +414,22 @@ export default function PairingScreen() {
         });
         clearTimeout(pollTimeout);
         if (res.ok) {
-          const device = await res.json();
+          const device = await res.json().catch(() => null);
           if (device.isOnline) {
+            pairRequestIdRef.current = "";
             setStep("done");
             setLoading(false);
             setStatusText("Device added successfully!");
             return;
           }
         }
-      } catch (e) {
+      } catch {
         // Ignore and retry
       }
       await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
     }
 
+    pairRequestIdRef.current = "";
     setStep("done");
     setLoading(false);
     setStatusText("Device paired! It may take a moment to appear online in your dashboard.");
@@ -648,7 +674,7 @@ export default function PairingScreen() {
             </View>
             <Text style={styles.h2}>Enter WiFi Password</Text>
             <Text style={styles.p}>
-              Enter the password for "{selectedWifi?.ssid}".
+              Enter the password for &quot;{selectedWifi?.ssid}&quot;.
             </Text>
 
             <Text style={styles.label}>Password</Text>

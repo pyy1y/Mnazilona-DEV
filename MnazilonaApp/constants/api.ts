@@ -2,9 +2,25 @@
 // ======================================
 // API Configuration
 // ======================================
-const DEV_API_URL = 'http://172.20.10.2:3000';
-//const PROD_API_URL = 'https://91.98.207.169';
+const DEFAULT_DEV_API_URL = 'http://192.168.8.143:3000';
+const DEFAULT_PROD_API_URL = 'https://91.98.207.169';
 const isDev = __DEV__;
+
+function normalizeApiUrl(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
+const DEV_API_URL = normalizeApiUrl(
+  process.env.EXPO_PUBLIC_API_URL_DEV ||
+    process.env.EXPO_PUBLIC_API_URL ||
+    DEFAULT_DEV_API_URL
+);
+
+const PROD_API_URL = normalizeApiUrl(
+  process.env.EXPO_PUBLIC_API_URL_PROD ||
+    process.env.EXPO_PUBLIC_API_URL ||
+    DEFAULT_PROD_API_URL
+);
 
 export const API_URL = isDev ? DEV_API_URL : PROD_API_URL;
 
@@ -64,8 +80,8 @@ export const ENDPOINTS = {
   NOTIFICATIONS: {
     LIST: '/notifications',
     UNREAD_COUNT: '/notifications/unread-count',
-    READ_ALL: '/notifications/read-all',
-    MARK_READ: (id: string) => `/notifications/${id}/read`,
+    READ_ALL: '/notifications',
+    MARK_READ: (id: string) => `/notifications/${id}`,
     RESPOND: (id: string) => `/notifications/${id}/respond`,
   },
 } as const;

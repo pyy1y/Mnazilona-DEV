@@ -231,7 +231,11 @@ exports.deleteAccountConfirm = async (req, res) => {
 
       try {
         const topic = topicOf(serial, 'command');
-        await publishMessage(topic, { command: 'unpaired', ts: Date.now() });
+        await publishMessage(topic, {
+          command: 'unpaired',
+          source: 'system',
+          ts: Date.now(),
+        });
       } catch (mqttErr) {
         console.log(`MQTT notify failed for ${serial} (non-critical):`, mqttErr.message);
       }

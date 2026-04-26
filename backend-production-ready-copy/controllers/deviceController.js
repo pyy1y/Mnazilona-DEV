@@ -10,6 +10,11 @@ const Firmware = require('../models/Firmware');
 const { topicOf, publishMessage, MQTT_BROKER_HOST } = require('../config/mqtt');
 const { canUserAccessDevice, getDeviceACL } = require('../services/mqttAclService');
 const { trackDeviceCommand, trackPairAttempt } = require('../services/anomalyDetector');
+const {
+  buildIdempotencyKey,
+  getIdempotentResponse,
+  storeIdempotentResponse,
+} = require('../services/idempotencyService');
 
 const ALLOWED_COMMANDS = ['open', 'on', 'off', 'toggle', 'status', 'restart', 'config'];
 
@@ -38,6 +43,13 @@ const sanitizeDeviceResponse = (device) => ({
   pairedAt: device.pairedAt,
   state: device.state,
 });
+
+function buildCommandHmac(mqttToken, command, ts) {
+  return crypto
+    .createHmac('sha256', mqttToken)
+    .update(`${command}${ts}`)
+    .digest('hex');
+}
 
 // ============================================================
 // inquiry - ESP32 device setup endpoint
@@ -149,7 +161,7 @@ exports.inquiry = async (req, res) => {
 // ============================================================
 exports.pair = async (req, res) => {
   try {
-    const { serialNumber, deviceSecret } = req.body;
+    const { serialNumber, deviceSecret, requestId } = req.body;
     const userId = req.user.id;
 
     if (!serialNumber || typeof serialNumber !== 'string') {
@@ -161,6 +173,18 @@ exports.pair = async (req, res) => {
     }
 
     const cleanSerial = serialNumber.trim().toUpperCase();
+    const cleanRequestId = typeof requestId === 'string' ? requestId.trim() : '';
+    const idempotencyKey = buildIdempotencyKey(
+      'device-pair',
+      cleanRequestId,
+      userId,
+      cleanSerial
+    );
+    const cachedResponse = await getIdempotentResponse(idempotencyKey);
+
+    if (cachedResponse) {
+      return res.status(cachedResponse.status).json(cachedResponse.body);
+    }
 
     // Track pair attempts for anomaly detection (device takeover)
     trackPairAttempt(cleanSerial, req.ip);
@@ -189,10 +213,18 @@ exports.pair = async (req, res) => {
 
     if (device.owner) {
       if (device.owner.toString() === userId) {
-        return res.status(200).json({
+        const responseBody = {
           message: 'Device already paired to your account',
           device: sanitizeDeviceResponse(device),
+          ...(cleanRequestId ? { requestId: cleanRequestId } : {}),
+        };
+
+        await storeIdempotentResponse(idempotencyKey, {
+          status: 200,
+          body: responseBody,
         });
+
+        return res.status(200).json(responseBody);
       }
 
       try {
@@ -230,10 +262,18 @@ exports.pair = async (req, res) => {
         console.error('Notification creation failed:', notifErr.message);
       }
 
-      return res.status(409).json({
+      const responseBody = {
         message: 'This device is owned by someone else. A request has been sent to the owner to unlink it. You will be notified if they approve.',
         ownerNotified: true,
+        ...(cleanRequestId ? { requestId: cleanRequestId } : {}),
+      };
+
+      await storeIdempotentResponse(idempotencyKey, {
+        status: 409,
+        body: responseBody,
       });
+
+      return res.status(409).json(responseBody);
     }
 
     device.owner = userId;
@@ -248,7 +288,12 @@ exports.pair = async (req, res) => {
 
     try {
       const topic = topicOf(cleanSerial, 'command');
-      await publishMessage(topic, { command: 'paired', userId, ts: Date.now() });
+      await publishMessage(topic, {
+        command: 'paired',
+        source: 'system',
+        userId,
+        ts: Date.now(),
+      });
     } catch (mqttErr) {
       console.log('MQTT notify failed (non-critical):', mqttErr.message);
     }
@@ -262,10 +307,18 @@ exports.pair = async (req, res) => {
       source: 'server',
     });
 
-    res.json({
+    const responseBody = {
       message: 'Device paired successfully',
       device: sanitizeDeviceResponse(device),
+      ...(cleanRequestId ? { requestId: cleanRequestId } : {}),
+    };
+
+    await storeIdempotentResponse(idempotencyKey, {
+      status: 200,
+      body: responseBody,
     });
+
+    res.json(responseBody);
   } catch (error) {
     console.error('Pair device error:', error.message);
     res.status(500).json({ message: 'Failed to pair device' });
@@ -304,7 +357,11 @@ exports.unpair = async (req, res) => {
 
     try {
       const topic = topicOf(cleanSerial, 'command');
-      await publishMessage(topic, { command: 'unpaired', ts: Date.now() });
+      await publishMessage(topic, {
+        command: 'unpaired',
+        source: 'system',
+        ts: Date.now(),
+      });
     } catch (mqttErr) {
       console.log('MQTT notify failed (non-critical):', mqttErr.message);
     }
@@ -368,7 +425,7 @@ exports.getOne = async (req, res) => {
 exports.sendCommand = async (req, res) => {
   try {
     const { serialNumber } = req.params;
-    const { command, params } = req.body;
+    const { command, params, requestId } = req.body;
     const userId = req.user.id;
 
     if (!serialNumber) return res.status(400).json({ message: 'Serial number is required' });
@@ -384,11 +441,26 @@ exports.sendCommand = async (req, res) => {
     }
 
     const cleanSerial = serialNumber.trim().toUpperCase();
+    const cleanRequestId = typeof requestId === 'string' ? requestId.trim() : '';
+    const idempotencyKey = buildIdempotencyKey(
+      'device-command',
+      cleanRequestId,
+      userId,
+      cleanSerial,
+      cleanCommand
+    );
+    const cachedResponse = await getIdempotentResponse(idempotencyKey);
 
-    const device = await Device.findOne({ serialNumber: cleanSerial, owner: userId });
+    if (cachedResponse) {
+      return res.status(cachedResponse.status).json(cachedResponse.body);
+    }
+
+    const device = await Device.findOne({ serialNumber: cleanSerial, owner: userId })
+      .select('+mqttToken');
     if (!device) return res.status(404).json({ message: 'Device not found or not owned by you' });
     if (device.adminLocked) return res.status(423).json({ message: 'Device is locked by admin. Contact support.' });
     if (!device.isOnline) return res.status(503).json({ message: 'Device is offline' });
+    if (!device.mqttToken) return res.status(503).json({ message: 'Device command channel is not ready' });
 
     const allowed = await AllowedDevice.findAllowed(cleanSerial);
     if (!allowed) {
@@ -399,11 +471,15 @@ exports.sendCommand = async (req, res) => {
     trackDeviceCommand(cleanSerial, req.ip);
 
     const topic = topicOf(cleanSerial, 'command');
+    const ts = Date.now().toString();
     const payload = {
       command: cleanCommand,
       params: params || {},
-      ts: Date.now(),
+      ts,
       userId,
+      source: 'user',
+      hmac: device.mqttToken ? buildCommandHmac(device.mqttToken, cleanCommand, ts) : '',
+      ...(cleanRequestId ? { requestId: cleanRequestId } : {}),
     };
 
     try {
@@ -416,11 +492,19 @@ exports.sendCommand = async (req, res) => {
         source: 'user',
       });
 
-      res.json({
+      const responseBody = {
         message: 'Command sent successfully',
         command: cleanCommand,
         sentAt: new Date().toISOString(),
+        ...(cleanRequestId ? { requestId: cleanRequestId } : {}),
+      };
+
+      await storeIdempotentResponse(idempotencyKey, {
+        status: 200,
+        body: responseBody,
       });
+
+      res.json(responseBody);
     } catch (mqttError) {
       return res.status(503).json({ message: 'Failed to send command - MQTT unavailable' });
     }

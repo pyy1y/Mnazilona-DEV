@@ -279,8 +279,12 @@ bool    doorDebouncePending  = false;  // هل فيه تغيّر ينتظر ال
 // Command Rate Limiting
 #define CMD_RATE_WINDOW_MS    5000UL  // نافذة 5 ثواني
 #define CMD_RATE_MAX          10      // أقصى 10 أوامر في النافذة
+#define CMD_DEDUP_WINDOW_MS   15000UL // تجاهل تكرار نفس requestId لمدة 15 ثانية
 uint32_t cmdWindowStart      = 0;
 uint8_t  cmdCount            = 0;
+String   lastCommandRequestId = "";
+String   lastCommandResponse  = "";
+uint32_t lastCommandHandledAt = 0;
 
 bool checkCommandRateLimit() {
   uint32_t now = millis();
@@ -296,6 +300,25 @@ bool checkCommandRateLimit() {
     return false;
   }
   return true;
+}
+
+bool isDuplicateCommandRequest(const String& requestId) {
+  if (requestId.length() == 0 || lastCommandRequestId.length() == 0) return false;
+  if (requestId != lastCommandRequestId) return false;
+  if (millis() - lastCommandHandledAt > CMD_DEDUP_WINDOW_MS) {
+    lastCommandRequestId = "";
+    lastCommandResponse = "";
+    lastCommandHandledAt = 0;
+    return false;
+  }
+  return true;
+}
+
+void rememberCommandRequest(const String& requestId, const String& responseJson) {
+  if (requestId.length() == 0) return;
+  lastCommandRequestId = requestId;
+  lastCommandResponse = responseJson;
+  lastCommandHandledAt = millis();
 }
 
 // OTA Update Variables
@@ -1342,6 +1365,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String source = doc["source"] | "";
   String cmdHmac = doc["hmac"] | "";
   String cmdTs   = doc["ts"] | "";
+  String requestId = doc["requestId"] | "";
+  requestId.trim();
+
+  if (isDuplicateCommandRequest(requestId)) {
+    Serial.printf("[MQTT] Duplicate command ignored (requestId=%s)\n", requestId.c_str());
+    return;
+  }
 
   // Verify command authenticity via HMAC (skip for system commands from broker)
   if (mqttToken.length() > 0 && source != "system") {
@@ -1385,6 +1415,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   // ── open / on / toggle = نفس الشي: pulse ثانيتين ──
   if (action == "open" || action == "on" || action == "toggle") {
     startRelayPulse();
+    rememberCommandRequest(requestId, "{\"status\":\"ok\",\"message\":\"Command executed\"}");
   }
   // ── status = أرسل حالة الجهاز ──
   else if (action == "status") {
@@ -1399,12 +1430,14 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       String rPayload;
       serializeJson(rDoc, rPayload);
       mqttPublishReliable("dp/report", rPayload.c_str());
+      rememberCommandRequest(requestId, rPayload);
     }
   }
   // ── restart = إعادة تشغيل ──
   else if (action == "restart") {
     Serial.println("[MQTT] Restart command");
     mqttPublishStatus("restarting");
+    rememberCommandRequest(requestId, "{\"status\":\"ok\",\"message\":\"Restarting\"}");
     delay(500);
     ESP.restart();
   }
@@ -1737,6 +1770,17 @@ void startLocalServer() {
     String action = doc["command"] | "";
     action.trim();
     action.toLowerCase();
+    String requestId = doc["requestId"] | "";
+    requestId.trim();
+
+    if (isDuplicateCommandRequest(requestId)) {
+      String duplicateResponse = lastCommandResponse.length() > 0
+        ? lastCommandResponse
+        : "{\"status\":\"ok\",\"message\":\"Duplicate command ignored\"}";
+      localServer.send(200, "application/json", duplicateResponse);
+      Serial.printf("[LocalAPI] Duplicate command ignored (requestId=%s)\n", requestId.c_str());
+      return;
+    }
 
     if (action == "open" || action == "on" || action == "toggle") {
       if (otaInProgress) {
@@ -1754,12 +1798,16 @@ void startLocalServer() {
       }
       startRelayPulse();
       addLog("Command: open (via local)", "info");
-      localServer.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Command executed locally\"}");
+      String response = "{\"status\":\"ok\",\"message\":\"Command executed locally\"}";
+      rememberCommandRequest(requestId, response);
+      localServer.send(200, "application/json", response);
       Serial.println("[LocalAPI] Command: open (local, authenticated)");
     }
     else if (action == "restart") {
       addLog("Restart command (via local)", "warning");
-      localServer.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Restarting...\"}");
+      String response = "{\"status\":\"ok\",\"message\":\"Restarting...\"}";
+      rememberCommandRequest(requestId, response);
+      localServer.send(200, "application/json", response);
       delay(500);
       ESP.restart();
     }
@@ -1776,6 +1824,7 @@ void startLocalServer() {
       rDoc["adminLocked"] = isLocked;
       String response;
       serializeJson(rDoc, response);
+      rememberCommandRequest(requestId, response);
       localServer.send(200, "application/json", response);
     }
     else {

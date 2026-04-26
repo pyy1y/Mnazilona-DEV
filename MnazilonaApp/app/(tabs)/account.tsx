@@ -186,7 +186,7 @@ export default function AccountScreen() {
           </View>
           <View style={styles.cardRowBody}>
             <Text style={styles.cardRowValue}>Preferences</Text>
-            <Text style={styles.cardRowLabel}>Language, theme & units</Text>
+            <Text style={styles.cardRowLabel}>Weather and device units</Text>
           </View>
           <MaterialCommunityIcons
             name="chevron-right"

@@ -80,12 +80,22 @@ export default function NotificationsScreen() {
 
   const markAllRead = useCallback(async () => {
     try {
-      await api.patch(ENDPOINTS.NOTIFICATIONS.READ_ALL, {}, { requireAuth: true });
+      const response = await api.patch(
+        ENDPOINTS.NOTIFICATIONS.READ_ALL,
+        undefined,
+        { requireAuth: true }
+      );
+      if (!response.success) {
+        if (isAuthError(response.status)) {
+          await handleAuthError(response.status);
+        }
+        return;
+      }
       setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
     } catch {
       // silent
     }
-  }, []);
+  }, [handleAuthError]);
 
   const respondToTransfer = useCallback(
     async (notificationId: string, action: "approve" | "deny") => {
@@ -281,7 +291,7 @@ export default function NotificationsScreen() {
       <View style={styles.emptyContainer}>
         <MaterialCommunityIcons name="bell-off-outline" size={64} color="#E0E0E0" />
         <Text style={styles.emptyTitle}>No Notifications</Text>
-        <Text style={styles.emptySubtitle}>You're all caught up!</Text>
+        <Text style={styles.emptySubtitle}>You&apos;re all caught up!</Text>
       </View>
     ),
     []

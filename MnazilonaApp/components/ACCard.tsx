@@ -14,7 +14,6 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
-  Dimensions,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
@@ -163,7 +162,7 @@ function ACCard({
   offlineText = 'OFFLINE',
 }: ACCardProps) {
   // Demo state
-  const [demoCurrentTemp, setDemoCurrentTemp] = useState(21);
+  const [demoCurrentTemp] = useState(21);
   const [demoTargetTemp, setDemoTargetTemp] = useState(23);
   const [demoMode, setDemoMode] = useState<ACMode>('off');
   const [demoFanMode, setDemoFanMode] = useState<FanMode>('low');

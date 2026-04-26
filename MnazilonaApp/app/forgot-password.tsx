@@ -54,6 +54,11 @@ export default function ForgotPasswordScreen() {
         email: normalizedEmail,
       });
 
+      if (!response.success) {
+        Alert.alert('Error', response.message || 'Failed to send reset code.');
+        return;
+      }
+
       // Note: Backend always returns success for security (doesn't reveal if email exists)
       Alert.alert(
         'Check Your Email',
@@ -112,7 +117,7 @@ export default function ForgotPasswordScreen() {
         {/* Header */}
         <Text style={styles.title}>Forgot Password</Text>
         <Text style={styles.subtitle}>
-          Enter your email address and we'll send you a code to reset your password.
+          Enter your email address and we&apos;ll send you a code to reset your password.
         </Text>
 
         {/* Email Input */}

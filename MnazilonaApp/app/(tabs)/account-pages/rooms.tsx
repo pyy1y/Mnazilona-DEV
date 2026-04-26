@@ -539,7 +539,7 @@ export default function RoomsScreen() {
           <Pressable style={styles.modalContainer} onPress={(e) => e.stopPropagation()}>
             <View style={styles.modalContent}>
               <Text style={styles.modalTitle}>
-                Add Device to "{assignRoom?.name}"
+                Add Device to &quot;{assignRoom?.name}&quot;
               </Text>
 
               {unassignedDevices.length === 0 ? (

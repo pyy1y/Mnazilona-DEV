@@ -89,6 +89,7 @@ const refreshTokenSchema = Joi.object({
 // ==================== DEVICE SCHEMAS ====================
 
 const serialNumberPattern = /^[A-Za-z0-9\-_.]+$/;
+const requestIdSchema = Joi.string().trim().max(80).pattern(/^[A-Za-z0-9:_-]+$/);
 
 const deviceInquirySchema = Joi.object({
   serialNumber: Joi.string().required().max(50).pattern(serialNumberPattern).messages({
@@ -101,6 +102,7 @@ const deviceInquirySchema = Joi.object({
 const devicePairSchema = Joi.object({
   serialNumber: Joi.string().required().max(50).pattern(serialNumberPattern),
   deviceSecret: Joi.string().required().max(128),
+  requestId: requestIdSchema.optional(),
 });
 
 const deviceUnpairSchema = Joi.object({
@@ -112,6 +114,7 @@ const deviceCommandSchema = Joi.object({
     'any.only': 'Invalid command',
   }),
   params: Joi.object().optional().default({}),
+  requestId: requestIdSchema.optional(),
 });
 
 const deviceRenameSchema = Joi.object({

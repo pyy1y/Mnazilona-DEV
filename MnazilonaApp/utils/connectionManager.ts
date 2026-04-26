@@ -4,6 +4,7 @@
 
 import { api } from './api';
 import { ENDPOINTS } from '../constants/api';
+import { createRequestId } from './requestId';
 import {
   isDeviceLocal,
   sendLocalCommand,
@@ -77,6 +78,8 @@ export async function smartSendCommand(
   command: string,
   params?: Record<string, any>
 ): Promise<CommandResult> {
+  const requestId = createRequestId('cmd');
+
   // Validate command against whitelist
   if (!ALLOWED_COMMANDS.has(command)) {
     return {
@@ -102,7 +105,12 @@ export async function smartSendCommand(
 
   // Try local first
   if (isDeviceLocal(serialNumber)) {
-    const localResult = await sendLocalCommand(serialNumber, command, params);
+    const localResult = await sendLocalCommand(
+      serialNumber,
+      command,
+      params,
+      requestId
+    );
 
     if (localResult.success) {
       return {
@@ -118,7 +126,7 @@ export async function smartSendCommand(
   try {
     const response = await api.post<any>(
       ENDPOINTS.DEVICES.COMMAND(serialNumber),
-      { command, params },
+      { command, params, requestId },
       { requireAuth: true }
     );
 

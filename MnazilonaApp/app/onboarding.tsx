@@ -10,14 +10,13 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { setOnboardingSeen } from '../utils/onboarding';
 
 const { width, height } = Dimensions.get('window');
 
 const BRAND_COLOR = '#2E5B8E';
-const ONBOARDING_KEY = 'onboarding_seen';
 
 type Slide = {
   id: string;
@@ -65,7 +64,7 @@ export default function OnboardingScreen() {
 
   const handleFinish = useCallback(async () => {
     try {
-      await AsyncStorage.setItem(ONBOARDING_KEY, 'true');
+      await setOnboardingSeen(true);
       router.replace('/login');
     } catch (error) {
       if (__DEV__) console.error('Failed to save onboarding state:', error);

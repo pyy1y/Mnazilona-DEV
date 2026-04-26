@@ -11,92 +11,45 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+
+import {
+  loadPreferences,
+  savePreferences,
+  type TemperatureUnit,
+} from '../../../utils/preferences';
 
 const BRAND_COLOR = '#2E5B8E';
-
-const PREFS_KEY = 'mnazilona_preferences';
-
-type SelectionType = 'language' | 'theme' | 'temperature' | null;
-
-interface Preferences {
-  language: string;
-  theme: string;
-  temperatureUnit: string;
-}
-
-const DEFAULT_PREFS: Preferences = {
-  language: 'English',
-  theme: 'System',
-  temperatureUnit: 'Celsius',
-};
-
-async function loadPreferences(): Promise<Preferences> {
-  try {
-    const raw = await AsyncStorage.getItem(PREFS_KEY);
-    if (!raw) return DEFAULT_PREFS;
-    return { ...DEFAULT_PREFS, ...JSON.parse(raw) };
-  } catch {
-    return DEFAULT_PREFS;
-  }
-}
-
-async function savePreferences(prefs: Preferences): Promise<void> {
-  try {
-    await AsyncStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
-  } catch {
-    if (__DEV__) console.error('Failed to save preferences');
-  }
-}
 
 export default function PreferencesScreen() {
   const router = useRouter();
 
-  const [language, setLanguage] = useState('English');
-  const [theme, setTheme] = useState('System');
-  const [temperatureUnit, setTemperatureUnit] = useState('Celsius');
+  const [temperatureUnit, setTemperatureUnit] =
+    useState<TemperatureUnit>('Celsius');
   const [isLoaded, setIsLoaded] = useState(false);
+  const [isUnitSheetVisible, setIsUnitSheetVisible] = useState(false);
 
-  const [activeSheet, setActiveSheet] = useState<SelectionType>(null);
-
-  // Load saved preferences on mount
   useEffect(() => {
     loadPreferences().then((prefs) => {
-      setLanguage(prefs.language);
-      setTheme(prefs.theme);
       setTemperatureUnit(prefs.temperatureUnit);
       setIsLoaded(true);
     });
   }, []);
 
-  // Save whenever a preference changes (after initial load)
   useEffect(() => {
     if (!isLoaded) return;
-    savePreferences({ language, theme, temperatureUnit });
-  }, [language, theme, temperatureUnit, isLoaded]);
+    savePreferences({ temperatureUnit });
+  }, [temperatureUnit, isLoaded]);
 
   const handleGoBack = useCallback(() => {
     router.replace('/(tabs)/account');
   }, [router]);
 
-  const openLanguageSheet = useCallback(() => {
-    setActiveSheet('language');
-  }, []);
-
-  const openThemeSheet = useCallback(() => {
-    setActiveSheet('theme');
-  }, []);
-
-  const openTemperatureSheet = useCallback(() => {
-    setActiveSheet('temperature');
-  }, []);
-
   const closeSheet = useCallback(() => {
-    setActiveSheet(null);
+    setIsUnitSheetVisible(false);
   }, []);
 
   const renderOption = (
-    label: string,
+    label: TemperatureUnit,
     isSelected: boolean,
     onPress: () => void
   ) => (
@@ -122,13 +75,6 @@ export default function PreferencesScreen() {
     </TouchableOpacity>
   );
 
-  const getSheetTitle = () => {
-    if (activeSheet === 'language') return 'Select Language';
-    if (activeSheet === 'theme') return 'Select Theme';
-    if (activeSheet === 'temperature') return 'Select Temperature Unit';
-    return '';
-  };
-
   return (
     <View style={styles.container}>
       <ScrollView
@@ -142,64 +88,13 @@ export default function PreferencesScreen() {
         </TouchableOpacity>
 
         <Text style={styles.headerTitle}>Preferences</Text>
-        <Text style={styles.headerSubtitle}>Manage app language, appearance and units</Text>
+        <Text style={styles.headerSubtitle}>
+          Manage the settings that are currently applied across supported screens.
+        </Text>
 
-        {/* Language Card */}
         <TouchableOpacity
           style={styles.cardRow}
-          onPress={openLanguageSheet}
-          activeOpacity={0.7}
-        >
-          <View style={styles.leftIconWrap}>
-            <MaterialCommunityIcons
-              name="translate"
-              size={24}
-              color={BRAND_COLOR}
-            />
-          </View>
-
-          <View style={styles.cardRowBody}>
-            <Text style={styles.cardRowValue}>Language</Text>
-            <Text style={styles.cardRowLabel}>{language}</Text>
-          </View>
-
-          <MaterialCommunityIcons
-            name="chevron-right"
-            size={24}
-            color={BRAND_COLOR}
-          />
-        </TouchableOpacity>
-
-        {/* Theme Card */}
-        <TouchableOpacity
-          style={styles.cardRow}
-          onPress={openThemeSheet}
-          activeOpacity={0.7}
-        >
-          <View style={styles.leftIconWrap}>
-            <MaterialCommunityIcons
-              name="theme-light-dark"
-              size={24}
-              color={BRAND_COLOR}
-            />
-          </View>
-
-          <View style={styles.cardRowBody}>
-            <Text style={styles.cardRowValue}>Theme</Text>
-            <Text style={styles.cardRowLabel}>{theme}</Text>
-          </View>
-
-          <MaterialCommunityIcons
-            name="chevron-right"
-            size={24}
-            color={BRAND_COLOR}
-          />
-        </TouchableOpacity>
-
-        {/* Temperature Unit Card */}
-        <TouchableOpacity
-          style={styles.cardRow}
-          onPress={openTemperatureSheet}
+          onPress={() => setIsUnitSheetVisible(true)}
           activeOpacity={0.7}
         >
           <View style={styles.leftIconWrap}>
@@ -221,10 +116,23 @@ export default function PreferencesScreen() {
             color={BRAND_COLOR}
           />
         </TouchableOpacity>
+
+        <View style={styles.infoCard}>
+          <MaterialCommunityIcons
+            name="information-outline"
+            size={20}
+            color={BRAND_COLOR}
+            style={styles.infoIcon}
+          />
+          <Text style={styles.infoText}>
+            This setting is now applied in the dashboard weather card and is
+            ready for the rest of the app as device views move out of preview mode.
+          </Text>
+        </View>
       </ScrollView>
 
       <Modal
-        visible={activeSheet !== null}
+        visible={isUnitSheetVisible}
         animationType="slide"
         transparent
         onRequestClose={closeSheet}
@@ -241,54 +149,20 @@ export default function PreferencesScreen() {
 
           <View style={styles.modalSheet}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>{getSheetTitle()}</Text>
+              <Text style={styles.modalTitle}>Select Temperature Unit</Text>
               <TouchableOpacity onPress={closeSheet} style={styles.modalCloseBtn}>
                 <MaterialCommunityIcons name="close" size={24} color="#666" />
               </TouchableOpacity>
             </View>
 
-            {activeSheet === 'language' && (
-              <>
-                {renderOption('English', language === 'English', () => {
-                  setLanguage('English');
-                  closeSheet();
-                })}
-                {renderOption('Arabic', language === 'Arabic', () => {
-                  setLanguage('Arabic');
-                  closeSheet();
-                })}
-              </>
-            )}
-
-            {activeSheet === 'theme' && (
-              <>
-                {renderOption('Light', theme === 'Light', () => {
-                  setTheme('Light');
-                  closeSheet();
-                })}
-                {renderOption('Dark', theme === 'Dark', () => {
-                  setTheme('Dark');
-                  closeSheet();
-                })}
-                {renderOption('System', theme === 'System', () => {
-                  setTheme('System');
-                  closeSheet();
-                })}
-              </>
-            )}
-
-            {activeSheet === 'temperature' && (
-              <>
-                {renderOption('Celsius', temperatureUnit === 'Celsius', () => {
-                  setTemperatureUnit('Celsius');
-                  closeSheet();
-                })}
-                {renderOption('Fahrenheit', temperatureUnit === 'Fahrenheit', () => {
-                  setTemperatureUnit('Fahrenheit');
-                  closeSheet();
-                })}
-              </>
-            )}
+            {renderOption('Celsius', temperatureUnit === 'Celsius', () => {
+              setTemperatureUnit('Celsius');
+              closeSheet();
+            })}
+            {renderOption('Fahrenheit', temperatureUnit === 'Fahrenheit', () => {
+              setTemperatureUnit('Fahrenheit');
+              closeSheet();
+            })}
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -360,61 +234,79 @@ const styles = StyleSheet.create({
   },
   cardRowValue: {
     fontSize: 16,
-    color: '#333',
-    fontWeight: '700',
+    fontWeight: '600',
+    color: '#1E2A37',
+    marginBottom: 4,
   },
   cardRowLabel: {
-    fontSize: 13,
-    color: '#888',
+    fontSize: 14,
+    color: '#7A8CA5',
+  },
+  infoCard: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#F4F8FC',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#E1EBF5',
+  },
+  infoIcon: {
+    marginRight: 10,
     marginTop: 2,
+  },
+  infoText: {
+    flex: 1,
+    fontSize: 14,
+    lineHeight: 20,
+    color: '#5F7085',
   },
   modalOverlay: {
     flex: 1,
     justifyContent: 'flex-end',
   },
   modalBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.25)',
   },
   modalSheet: {
     backgroundColor: '#FFFFFF',
+    paddingHorizontal: 24,
+    paddingTop: 18,
+    paddingBottom: Platform.OS === 'ios' ? 34 : 24,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    padding: 24,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 8,
   },
   modalHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 18,
-    paddingBottom: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F0F0F0',
+    marginBottom: 12,
   },
   modalTitle: {
     fontSize: 20,
     fontWeight: '700',
-    color: '#333',
+    color: '#1E2A37',
   },
   modalCloseBtn: {
     padding: 4,
   },
   optionRow: {
-    height: 56,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    paddingHorizontal: 16,
-    marginBottom: 10,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#FFFFFF',
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#EEF2F6',
   },
   optionText: {
     fontSize: 16,
-    color: '#333',
-    fontWeight: '600',
+    color: '#1E2A37',
+    fontWeight: '500',
   },
 });

@@ -4,6 +4,12 @@ import { getUser } from "../../utils/userStorage";
 import React, { useCallback, useMemo, useRef, useState, useEffect } from "react";
 
 import { fetchWeatherByCity, type WeatherResult, type WeatherState } from '../../utils/weather';
+import {
+  convertTemperature,
+  getTemperatureUnitSymbol,
+  loadPreferences,
+  type TemperatureUnit,
+} from '../../utils/preferences';
 
 import {
   View,
@@ -25,7 +31,12 @@ import { useAuth } from '../../hooks/useAuth';
 import { ENDPOINTS, APP_CONFIG } from '../../constants/api';
 import DeviceListItem from '../../components/DeviceListItem';
 import { DeviceCache } from '../../utils/deviceCache';
-import { startLocalDiscovery, stopLocalDiscovery, onLocalStatusUpdate } from '../../utils/localDiscovery';
+import {
+  startLocalDiscovery,
+  stopLocalDiscovery,
+  onLocalDevicesChanged,
+  onLocalStatusUpdate,
+} from '../../utils/localDiscovery';
 import { smartSendCommand, smartFetchLogs } from '../../utils/connectionManager';
 
 const BRAND_COLOR = '#2E5B8E';
@@ -56,17 +67,12 @@ type Room = {
   name: string;
   icon: string;
 };
-
-type DeviceCommand = {
-  command: string;
-  params?: Record<string, any>;
-};
 // ======================================
 // Component
 // ======================================
 export default function DashboardScreen() {
   const router = useRouter();
-  const { logout, handleAuthError } = useAuth();
+  const { handleAuthError } = useAuth();
 
   // =========================
   // USER DISPLAY NAME (Dynamic)
@@ -81,6 +87,8 @@ export default function DashboardScreen() {
 const [weather, setWeather] = useState<WeatherResult | null>(null);
 const [weatherLoading, setWeatherLoading] = useState(true);
 const [weatherError, setWeatherError] = useState<string | null>(null);
+  const [temperatureUnit, setTemperatureUnit] =
+    useState<TemperatureUnit>('Celsius');
 
   // =========================
   // YOUR EXISTING STATES (Devices, Loading, etc.)
@@ -112,18 +120,24 @@ const [weatherError, setWeatherError] = useState<string | null>(null);
     const city = user?.city?.trim();
     setUserCity(city || "Dammam");
 
-  } catch (e) {
+  } catch {
     setUserName("Guest");
     setUserCity("Dammam");
   }
 }, []);
+
+  const loadAppPreferences = useCallback(async () => {
+    const prefs = await loadPreferences();
+    setTemperatureUnit(prefs.temperatureUnit);
+  }, []);
 
   // ==========================================
   // (ADDED) Run once on mount
   // ==========================================
   useEffect(() => {
     loadUserName();
-  }, [loadUserName]);
+    loadAppPreferences();
+  }, [loadUserName, loadAppPreferences]);
 
   // ==========================================
 // Load Weather (Dammam) on screen mount
@@ -142,7 +156,7 @@ useEffect(() => {
       const w = await fetchWeatherByCity((userCity || "Dammam").trim());
 
       if (mounted) setWeather(w);
-    } catch (e: any) {
+    } catch {
       if (mounted) setWeatherError("Weather unavailable");
     } finally {
       if (mounted) setWeatherLoading(false);
@@ -167,8 +181,9 @@ useEffect(() => {
   useFocusEffect(
     useCallback(() => {
       loadUserName();
+      loadAppPreferences();
       return () => {};
-    }, [loadUserName])
+    }, [loadUserName, loadAppPreferences])
   );
 
   // ==========================================
@@ -376,16 +391,12 @@ const getWeatherIcon = (state?: WeatherState) => {
       // 2. Start local network discovery (mDNS)
       startLocalDiscovery();
 
-      // 3. Listen for local status updates and merge into device state
-      const unsubscribe = onLocalStatusUpdate((serialNumber, status) => {
-        // Track which devices are local (React state)
-        setLocalSerials((prev) => {
-          if (prev.has(serialNumber)) return prev;
-          const next = new Set(prev);
-          next.add(serialNumber);
-          return next;
-        });
+      const unsubscribeLocalDevices = onLocalDevicesChanged((serialNumbers) => {
+        setLocalSerials(new Set(serialNumbers));
+      });
 
+      // 3. Listen for local status updates and merge into device state
+      const unsubscribeStatus = onLocalStatusUpdate((serialNumber, status) => {
         setDevices((prev) =>
           prev.map((d) => {
             if (d.serialNumber !== serialNumber) return d;
@@ -408,7 +419,8 @@ const getWeatherIcon = (state?: WeatherState) => {
       }, APP_CONFIG.DEVICE_POLL_INTERVAL);
 
       return () => {
-        unsubscribe();
+        unsubscribeLocalDevices();
+        unsubscribeStatus();
         if (pollIntervalRef.current) {
           clearInterval(pollIntervalRef.current);
           pollIntervalRef.current = null;
@@ -432,13 +444,19 @@ const getWeatherIcon = (state?: WeatherState) => {
       const response = await api.get<any>(ENDPOINTS.NOTIFICATIONS.UNREAD_COUNT, {
         requireAuth: true,
       });
+      if (!response.success) {
+        if (isAuthError(response.status)) {
+          await handleAuthError(response.status);
+        }
+        return;
+      }
       if (response.success && response.data?.count !== undefined) {
         setUnreadNotifCount(response.data.count);
       }
     } catch {
       // silent
     }
-  }, []);
+  }, [handleAuthError]);
 
   useEffect(() => {
     loadUnreadCount();
@@ -528,6 +546,21 @@ const getWeatherIcon = (state?: WeatherState) => {
     return devices.filter(d => localSerials.has(d.serialNumber)).length;
   }, [devices, localSerials]);
 
+  const weatherTemp = useMemo(() => {
+    if (!weather) return null;
+    return Math.round(convertTemperature(weather.tempC, temperatureUnit));
+  }, [weather, temperatureUnit]);
+
+  const feelsLikeTemp = useMemo(() => {
+    if (!weather || weather.feelsLikeC === undefined) return null;
+    return Math.round(convertTemperature(weather.feelsLikeC, temperatureUnit));
+  }, [weather, temperatureUnit]);
+
+  const temperatureUnitSymbol = useMemo(
+    () => getTemperatureUnitSymbol(temperatureUnit),
+    [temperatureUnit]
+  );
+
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -583,33 +616,36 @@ const getWeatherIcon = (state?: WeatherState) => {
     </View>
 
     {weatherLoading ? (
-  <View style={{ marginTop: 12 }}>
-    <ActivityIndicator size="small" color={BRAND_COLOR} />
-    <Text style={styles.cardSubText}>Loading weather...</Text>
-  </View>
-) : weatherError ? (
-  <Text style={styles.cardSubText}>{weatherError}</Text>
-) : weather ? (
-  <View style={{ marginTop: 12 }}>
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-      <MaterialCommunityIcons
-        name={getWeatherIcon(weather.state)}
-        size={32}
-        color={BRAND_COLOR}
-      />
-      <Text style={styles.weatherTemp}>
-        {Math.round(weather.tempC)}°
-      </Text>
-    </View>
+      <View style={styles.weatherLoadingState}>
+        <ActivityIndicator size="small" color={BRAND_COLOR} />
+        <Text style={styles.cardSubText}>Loading weather...</Text>
+      </View>
+    ) : weatherError ? (
+      <Text style={styles.cardSubText}>{weatherError}</Text>
+    ) : weather ? (
+      <View style={styles.weatherContent}>
+        <View style={styles.weatherMainRow}>
+          <View style={styles.weatherIconWrap}>
+            <MaterialCommunityIcons
+              name={getWeatherIcon(weather.state)}
+              size={28}
+              color={BRAND_COLOR}
+            />
+          </View>
 
-    <Text style={styles.cardSubText}>
-      {weather.description}
-      {weather.feelsLikeC ? ` • Feels ${weather.feelsLikeC}°` : ""}
-    </Text>
-  </View>
-) : (
-  <Text style={styles.cardSubText}>No weather data</Text>
-)}
+          <Text style={styles.weatherTemp}>
+            {weatherTemp}°{temperatureUnitSymbol}
+          </Text>
+        </View>
+
+        <Text style={styles.weatherSummary}>
+          {weather.description}
+          {feelsLikeTemp !== null ? ` • Feels ${feelsLikeTemp}°${temperatureUnitSymbol}` : ""}
+        </Text>
+      </View>
+    ) : (
+      <Text style={styles.cardSubText}>No weather data</Text>
+    )}
   </View>
 {/* Status Card */}
 <View style={styles.card}>
@@ -804,23 +840,22 @@ const styles = StyleSheet.create({
     // ===== ADDED STYLES: Quick Cards =====
 
   cardsRow: {
-  flexDirection: 'row',
-  gap: 14,
-  marginBottom: 18,
-},
+    flexDirection: 'row',
+    gap: 14,
+    marginBottom: 18,
+  },
 
   card: {
-  flex: 1,
-  borderRadius: 20,
-  backgroundColor: '#FFFFFF',
-  padding: 16,
-
-  shadowColor: '#1E3A5F',
-  shadowOpacity: 0.08,
-  shadowRadius: 14,
-  shadowOffset: { width: 0, height: 8 },
-  elevation: 3,
-},
+    flex: 1,
+    borderRadius: 20,
+    backgroundColor: '#FFFFFF',
+    padding: 16,
+    shadowColor: '#1E3A5F',
+    shadowOpacity: 0.08,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 3,
+  },
 
   cardTopRow: {
     flexDirection: 'row',
@@ -839,12 +874,44 @@ const styles = StyleSheet.create({
     color: '#7A8A99',
   },
 
+  weatherLoadingState: {
+    marginTop: 12,
+  },
+
+  weatherContent: {
+    marginTop: 14,
+  },
+
+  weatherMainRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+
+  weatherIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: '#F3F7FB',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
   weatherTemp: {
-  marginTop: 8,
-  fontSize: 40,
-  fontWeight: '900',
-  color: BRAND_COLOR,
-},
+    fontSize: 34,
+    lineHeight: 38,
+    fontWeight: '900',
+    letterSpacing: -1.2,
+    color: BRAND_COLOR,
+  },
+
+  weatherSummary: {
+    marginTop: 10,
+    fontSize: 13,
+    lineHeight: 18,
+    color: '#7A8A99',
+  },
 
   statusMain: {
     marginTop: 12,

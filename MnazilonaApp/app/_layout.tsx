@@ -5,11 +5,13 @@ import { View, ActivityIndicator, StyleSheet, Alert, Platform } from 'react-nati
 import { Slot, useRouter, useSegments, useGlobalSearchParams } from 'expo-router';
 import { checkAuthState, logout } from '../utils/auth';
 import { setAuthExpiredHandler } from '../utils/api';
+import { hasSeenOnboarding } from '../utils/onboarding';
 
 const BRAND_COLOR = '#2E5B8E';
 
 // ✅ أضفت change-password للصفحات العامة
 const PUBLIC_ROUTES = [
+  'onboarding',
   'login',
   'register',
   'forgot-password',
@@ -39,9 +41,15 @@ export default function RootLayout() {
   const checkAuth = useCallback(async () => {
     try {
       const { isAuthenticated } = await checkAuthState();
+      const onboardingSeen = await hasSeenOnboarding();
 
       const currentSegment = segments[0] as string | undefined;
       const inTabs = currentSegment === '(tabs)';
+
+      if (!currentSegment) {
+        router.replace(isAuthenticated ? '/(tabs)' : onboardingSeen ? '/login' : '/onboarding');
+        return;
+      }
 
       // OTP خاصة - تعتبر public إلا لو delete_account
       const isOtpPublic = currentSegment === 'otp' && mode !== 'delete_account';
@@ -54,6 +62,16 @@ export default function RootLayout() {
         inTabs ||
         PROTECTED_ROUTES.includes(currentSegment as ProtectedRoute) ||
         isOtpProtected;
+
+      if (!isAuthenticated && !onboardingSeen && currentSegment !== 'onboarding') {
+        router.replace('/onboarding');
+        return;
+      }
+
+      if (!isAuthenticated && onboardingSeen && currentSegment === 'onboarding') {
+        router.replace('/login');
+        return;
+      }
 
       if (!isAuthenticated && isProtectedRoute) {
         // المستخدم مو مسجل ويحاول يدخل صفحة محمية

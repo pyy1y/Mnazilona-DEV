@@ -56,6 +56,18 @@ type StatusListener = (serialNumber: string, status: LocalDeviceStatus) => void;
 const statusListeners: StatusListener[] = [];
 let statusPollInterval: ReturnType<typeof setInterval> | null = null;
 
+type DevicesListener = (serialNumbers: string[]) => void;
+const deviceListeners: DevicesListener[] = [];
+
+function getLocalSerialNumbers(): string[] {
+  return Array.from(discoveredDevices.keys()).sort();
+}
+
+function notifyDeviceListeners(): void {
+  const serialNumbers = getLocalSerialNumbers();
+  deviceListeners.forEach((listener) => listener(serialNumbers));
+}
+
 // ======================================
 // mDNS Discovery
 // ======================================
@@ -80,6 +92,7 @@ export function startLocalDiscovery(): void {
 
       if (device.ip) {
         discoveredDevices.set(device.serialNumber, device);
+        notifyDeviceListeners();
         if (__DEV__) console.log(`[LocalDiscovery] Found: ${device.serialNumber} at ${device.ip}:${device.port}`);
       }
     });
@@ -88,6 +101,7 @@ export function startLocalDiscovery(): void {
       const serial = service.txt?.serial || service.txt?.sn || '';
       if (serial) {
         discoveredDevices.delete(serial.toUpperCase());
+        notifyDeviceListeners();
         if (__DEV__) console.log(`[LocalDiscovery] Removed: ${serial}`);
       }
     });
@@ -117,6 +131,10 @@ export function stopLocalDiscovery(): void {
     zeroconf.removeAllListeners();
     zeroconf = null;
     isScanning = false;
+    if (discoveredDevices.size > 0) {
+      discoveredDevices.clear();
+      notifyDeviceListeners();
+    }
     if (__DEV__) console.log('[LocalDiscovery] Scanning stopped');
   } catch {
     // Non-fatal
@@ -146,7 +164,8 @@ export function getLocalDevices(): LocalDevice[] {
 export async function sendLocalCommand(
   serialNumber: string,
   command: string,
-  params?: Record<string, any>
+  params?: Record<string, any>,
+  requestId?: string
 ): Promise<{ success: boolean; data?: any }> {
   const device = getLocalDevice(serialNumber);
   if (!device) return { success: false };
@@ -159,7 +178,7 @@ export async function sendLocalCommand(
     const response = await fetch(`http://${device.ip}:${device.port}/command`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ command, params: params || {} }),
+      body: JSON.stringify({ command, params: params || {}, requestId }),
       signal: controller.signal,
     });
 
@@ -172,6 +191,7 @@ export async function sendLocalCommand(
   } catch {
     clearTimeout(timeoutId);
     discoveredDevices.delete(serialNumber.toUpperCase());
+    notifyDeviceListeners();
     return { success: false };
   }
 }
@@ -206,6 +226,7 @@ export async function fetchLocalStatus(
     clearTimeout(timeoutId);
     // Device unreachable — remove from local cache
     discoveredDevices.delete(serialNumber.toUpperCase());
+    notifyDeviceListeners();
     return { success: false };
   }
 }
@@ -257,6 +278,15 @@ export function onLocalStatusUpdate(listener: StatusListener): () => void {
   return () => {
     const idx = statusListeners.indexOf(listener);
     if (idx >= 0) statusListeners.splice(idx, 1);
+  };
+}
+
+export function onLocalDevicesChanged(listener: DevicesListener): () => void {
+  deviceListeners.push(listener);
+  listener(getLocalSerialNumbers());
+  return () => {
+    const idx = deviceListeners.indexOf(listener);
+    if (idx >= 0) deviceListeners.splice(idx, 1);
   };
 }
 

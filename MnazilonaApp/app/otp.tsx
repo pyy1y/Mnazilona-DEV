@@ -102,7 +102,7 @@ export default function OTPScreen() {
   // State
   const [code, setCode] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(APP_CONFIG.OTP_RESEND_SECONDS);
+  const [secondsLeft, setSecondsLeft] = useState<number>(APP_CONFIG.OTP_RESEND_SECONDS);
   const [userEmail, setUserEmail] = useState(emailFromParams);
 
   // Refs
@@ -202,47 +202,6 @@ export default function OTPScreen() {
   const handleCodeChange = useCallback((value: string) => {
     setCode(sanitizeOTP(value, APP_CONFIG.OTP_LENGTH));
   }, []);
-
-  const handleVerify = useCallback(async () => {
-    if (!canVerify) return;
-
-    // Validate code
-    if (!isValidOTP(code, APP_CONFIG.OTP_LENGTH)) {
-      Alert.alert('Invalid Code', `Please enter the ${APP_CONFIG.OTP_LENGTH}-digit verification code.`);
-      return;
-    }
-
-    // Mode-specific validation
-    if (mode !== 'delete_account' && !displayEmail) {
-      Alert.alert('Missing Email', 'Email is missing. Please go back and try again.');
-      return;
-    }
-
-    // Handle reset_password mode - navigate to change password screen
-    if (mode === 'reset_password') {
-      router.push({
-        pathname: '/change-password',
-        params: { email: displayEmail, code },
-      });
-      return;
-    }
-
-    // Handle delete_account mode - show confirmation
-    if (mode === 'delete_account') {
-      Alert.alert(
-        'Final Confirmation',
-        'Are you sure you want to permanently delete your account? This action cannot be undone.',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Delete', style: 'destructive', onPress: handleDeleteAccount },
-        ]
-      );
-      return;
-    }
-
-    // Handle login and register modes
-    await handleVerifyCode();
-  }, [canVerify, code, mode, displayEmail, router]);
 
   const handleVerifyCode = useCallback(async () => {
     setIsLoading(true);
@@ -347,6 +306,47 @@ export default function OTPScreen() {
       setIsLoading(false);
     }
   }, [code, router]);
+
+  const handleVerify = useCallback(async () => {
+    if (!canVerify) return;
+
+    // Validate code
+    if (!isValidOTP(code, APP_CONFIG.OTP_LENGTH)) {
+      Alert.alert('Invalid Code', `Please enter the ${APP_CONFIG.OTP_LENGTH}-digit verification code.`);
+      return;
+    }
+
+    // Mode-specific validation
+    if (mode !== 'delete_account' && !displayEmail) {
+      Alert.alert('Missing Email', 'Email is missing. Please go back and try again.');
+      return;
+    }
+
+    // Handle reset_password mode - navigate to change password screen
+    if (mode === 'reset_password') {
+      router.push({
+        pathname: '/change-password',
+        params: { email: displayEmail, code },
+      });
+      return;
+    }
+
+    // Handle delete_account mode - show confirmation
+    if (mode === 'delete_account') {
+      Alert.alert(
+        'Final Confirmation',
+        'Are you sure you want to permanently delete your account? This action cannot be undone.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Delete', style: 'destructive', onPress: handleDeleteAccount },
+        ]
+      );
+      return;
+    }
+
+    // Handle login and register modes
+    await handleVerifyCode();
+  }, [canVerify, code, mode, displayEmail, router, handleDeleteAccount, handleVerifyCode]);
 
   const handleResend = useCallback(async () => {
     if (!canResend) return;

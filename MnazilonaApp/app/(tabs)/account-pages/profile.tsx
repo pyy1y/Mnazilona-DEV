@@ -178,7 +178,7 @@ export default function ProfileScreen() {
 
     setIsUpdatingName(true);
     try {
-      const response = await api.put<any>(ENDPOINTS.USER.UPDATE_PROFILE, { name: trimmedName }, { requireAuth: true });
+      const response = await api.patch<any>(ENDPOINTS.USER.UPDATE_PROFILE, { name: trimmedName }, { requireAuth: true });
       if (!response.success) {
         if (isAuthError(response.status)) { await handleAuthError(response.status); return; }
         if (isUnsupportedUpdate(response.status, response.message)) { Alert.alert('Info', 'Name update not supported yet.'); return; }
@@ -219,33 +219,13 @@ export default function ProfileScreen() {
     setShowDatePicker(true);
   }, [user?.dob]);
 
-  const handleDateChange = useCallback(
-    (event: DateTimePickerEvent, selectedDate?: Date) => {
-      // على iOS نخلي الـ picker مفتوح
-      if (Platform.OS === 'android') {
-        setShowDatePicker(false);
-      }
-      if (event.type === 'dismissed') { setShowDatePicker(false); return; }
-      if (selectedDate) {
-        setDobDate(selectedDate);
-        if (Platform.OS === 'android') saveDob(selectedDate);
-      }
-    },
-    []
-  );
-
-  const handleDatePickerDone = useCallback(() => {
-    setShowDatePicker(false);
-    saveDob(dobDate);
-  }, [dobDate]);
-
   const saveDob = useCallback(async (date: Date) => {
     const formatted = formatDateStr(date);
     if (formatted === user?.dob) return;
 
     setIsUpdatingDob(true);
     try {
-      const response = await api.put<any>(ENDPOINTS.USER.UPDATE_PROFILE, { dob: formatted }, { requireAuth: true });
+      const response = await api.patch<any>(ENDPOINTS.USER.UPDATE_PROFILE, { dob: formatted }, { requireAuth: true });
       if (!response.success) {
         if (isAuthError(response.status)) { await handleAuthError(response.status); return; }
         Alert.alert('Error', response.message || 'Failed to update date of birth.');
@@ -260,6 +240,26 @@ export default function ProfileScreen() {
       setIsUpdatingDob(false);
     }
   }, [user?.dob, handleAuthError, updateLocalUser]);
+
+  const handleDateChange = useCallback(
+    (event: DateTimePickerEvent, selectedDate?: Date) => {
+      // على iOS نخلي الـ picker مفتوح
+      if (Platform.OS === 'android') {
+        setShowDatePicker(false);
+      }
+      if (event.type === 'dismissed') { setShowDatePicker(false); return; }
+      if (selectedDate) {
+        setDobDate(selectedDate);
+        if (Platform.OS === 'android') saveDob(selectedDate);
+      }
+    },
+    [saveDob]
+  );
+
+  const handleDatePickerDone = useCallback(() => {
+    setShowDatePicker(false);
+    saveDob(dobDate);
+  }, [dobDate, saveDob]);
 
   // ==================== Email Change (3-step) ====================
   const startResendTimer = useCallback(() => {
@@ -480,7 +480,7 @@ export default function ProfileScreen() {
           const updateData: any = { country: item };
           if (isNewCountry) updateData.city = '';
 
-          const response = await api.put<any>(ENDPOINTS.USER.UPDATE_PROFILE, updateData, { requireAuth: true });
+          const response = await api.patch<any>(ENDPOINTS.USER.UPDATE_PROFILE, updateData, { requireAuth: true });
           if (!response.success) {
             if (isAuthError(response.status)) { await handleAuthError(response.status); return; }
             Alert.alert('Error', response.message || 'Failed to update country.');
@@ -490,7 +490,7 @@ export default function ProfileScreen() {
           await updateLocalUser({ country: item, ...(isNewCountry ? { city: '' } : {}) });
           if (isNewCountry) { setCitiesList([]); fetchCities(item); }
         } else {
-          const response = await api.put<any>(ENDPOINTS.USER.UPDATE_PROFILE, { city: item }, { requireAuth: true });
+          const response = await api.patch<any>(ENDPOINTS.USER.UPDATE_PROFILE, { city: item }, { requireAuth: true });
           if (!response.success) {
             if (isAuthError(response.status)) { await handleAuthError(response.status); return; }
             Alert.alert('Error', response.message || 'Failed to update city.');
