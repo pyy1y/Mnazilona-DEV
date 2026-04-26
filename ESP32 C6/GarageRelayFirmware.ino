@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════════
- *  Mnazilona IoT - ESP32-C6 Firmware v1.0.0
- *  BLE Provisioning + Proof of Possession + DeviceSecret
+ *  Mnazilona IoT - ESP32-C6 Firmware v1.1.0
+ *  BLE Provisioning (no PoP) + DeviceSecret
  * ═══════════════════════════════════════════════════════════════
  *
  *  Garage Relay - Pulse Mode Only
@@ -12,11 +12,10 @@
  *    Board:  ESP32C6 Dev Module
  *    Libs:   ArduinoJson (6.21.x+), PubSubClient (2.8.x+)
  *
- *  Provisioning changed from SoftAP to BLE GATT.
- *  The device advertises a custom BLE service during pairing.
- *  The mobile app connects via BLE, verifies PoP, requests a
- *  WiFi scan, and sends WiFi credentials — all over BLE.
- *
+ *  Provisioning: BLE GATT (no PoP). Device identity is proved by
+ *  the cloud-side allowlist + device secret on /devices/inquiry.
+ *  Local API on port 8080 is open to the LAN (Tuya/SmartLife model);
+ *  it is gated on the device being paired to a user.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -87,14 +86,13 @@ int                bleScanChunkIndex   = 0;
 // ═══════════════════════════════════════
 #define SERIAL_NUMBER     "SN-001"
 #define DEVICE_NAME       "Garage Relay"
-#define FIRMWARE_VERSION  "1.0.0"
+#define FIRMWARE_VERSION  "1.1.0"
 
 // الأسرار تُقرأ من NVS (تُحرق مرة وحدة أثناء التصنيع)
 // استخدم أمر Provisioning لحرقها - لا تكتبها في الكود!
-// DEVICE_SECRET: مفتاح هوية الجهاز (32 حرف hex)
-// POP_CODE: رمز إثبات الحيازة (8+ حروف/أرقام، يُطبع على ملصق الجهاز)
+// DEVICE_SECRET: مفتاح هوية الجهاز (32 حرف hex). يُستخدم لإثبات هوية
+// الجهاز للسيرفر فقط (بدون رمز PoP).
 String deviceSecret = "";
-String popCode      = "";
 
 // ═══════════════════════════════════════
 // SERVER & TLS CONFIG
@@ -152,8 +150,6 @@ const char* ota_public_key = "";
 // ═══════════════════════════════════════
 // Security
 // ═══════════════════════════════════════
-#define MAX_POP_ATTEMPTS      5
-#define POP_LOCKOUT_MS        60000UL
 #define MQTT_MAX_RECONNECTS   3
 
 // ═══════════════════════════════════════
@@ -195,11 +191,15 @@ void syncNTP() {
 
 // ═══════════════════════════════════════
 // Local Logs (Circular Buffer)
+// Each entry stores both the device uptime (millis) and the real epoch
+// timestamp when NTP is synced. The mobile app can use either —
+// `epoch` is preferred, `uptimeMs` is a fallback.
 // ═══════════════════════════════════════
 #define MAX_LOCAL_LOGS        50
 
 struct LocalLog {
-  uint32_t timestamp;   // millis()
+  uint32_t uptimeMs;    // millis() at the time of the event
+  uint32_t epoch;       // unix epoch seconds (0 if NTP not synced yet)
   char message[80];
   char type[8];         // "info", "warning", "error"
 };
@@ -210,7 +210,10 @@ int logCount = 0;
 
 void addLog(const char* msg, const char* type) {
   LocalLog& entry = localLogs[logHead];
-  entry.timestamp = millis();
+  entry.uptimeMs = millis();
+  // Non-blocking epoch read. If NTP hasn't synced yet, time() returns a
+  // small value (seconds since boot), so guard with ntpSynced.
+  entry.epoch    = ntpSynced ? (uint32_t)time(nullptr) : 0;
   strncpy(entry.message, msg, sizeof(entry.message) - 1);
   entry.message[sizeof(entry.message) - 1] = '\0';
   strncpy(entry.type, type, sizeof(entry.type) - 1);
@@ -239,10 +242,6 @@ enum DeviceState {
 // Globals
 // ═══════════════════════════════════════
 DeviceState currentState   = STATE_BOOT;
-bool popVerified           = false;
-int popAttempts            = 0;
-uint32_t popLockoutStart   = 0;
-bool popLockedOut          = false;
 
 // TLS-secured clients
 WiFiClientSecure wifiSecureClient;
@@ -399,24 +398,25 @@ void blinkLED() {
 //            NVS STORAGE
 // ══════════════════════════════════════
 
-// Load device secrets from NVS (burned once during manufacturing)
+// Load device secret from NVS (burned once during manufacturing)
 bool loadSecrets() {
   prefs.begin("secrets", true);
   deviceSecret = prefs.getString("secret", "");
-  popCode      = prefs.getString("pop", "");
   prefs.end();
 
-  if (deviceSecret.length() == 0 || popCode.length() == 0) {
-    Serial.println("[SECURITY] Device secrets NOT provisioned!");
-    Serial.println("[SECURITY] Use serial provisioning to burn secrets.");
+  if (deviceSecret.length() == 0) {
+    Serial.println("[SECURITY] Device secret NOT provisioned!");
+    Serial.println("[SECURITY] Use serial provisioning to burn the secret.");
     return false;
   }
-  Serial.println("[SECURITY] Device secrets loaded from NVS");
+  Serial.println("[SECURITY] Device secret loaded from NVS");
   return true;
 }
 
-// Provision secrets via Serial (run once during manufacturing)
-// Send: PROVISION:secret=<hex32>,pop=<code8+>
+// Provision secret via Serial (run once during manufacturing)
+// Send: PROVISION:secret=<hex32>
+// (PoP code is no longer used; left here only for backward compatibility:
+//  any extra params after the secret are ignored.)
 void checkSerialProvisioning() {
   if (!Serial.available()) return;
   String line = Serial.readStringUntil('\n');
@@ -425,62 +425,29 @@ void checkSerialProvisioning() {
   if (!line.startsWith("PROVISION:")) return;
 
   String params = line.substring(10);
-  String secret = "", pop = "";
+  String secret = "";
 
+  // Accept either "secret=<hex>" alone or "secret=<hex>,..." (legacy)
   int commaIdx = params.indexOf(',');
-  if (commaIdx < 0) return;
-
-  String part1 = params.substring(0, commaIdx);
-  String part2 = params.substring(commaIdx + 1);
-
+  String part1 = (commaIdx < 0) ? params : params.substring(0, commaIdx);
   if (part1.startsWith("secret=")) secret = part1.substring(7);
-  if (part2.startsWith("pop="))    pop    = part2.substring(4);
 
-  if (secret.length() < 32 || pop.length() < 6) {
-    Serial.println("[PROVISION] Error: secret must be 32+ chars, pop must be 6+ chars");
+  if (secret.length() < 32) {
+    Serial.println("[PROVISION] Error: secret must be 32+ chars");
     return;
   }
 
   prefs.begin("secrets", false);
   prefs.putString("secret", secret);
-  prefs.putString("pop", pop);
+  prefs.remove("pop");  // clean up any legacy PoP value from older firmware
   prefs.end();
 
   deviceSecret = secret;
-  popCode = pop;
 
-  Serial.println("[PROVISION] Secrets burned to NVS successfully!");
-  Serial.printf("[PROVISION] Secret: %s...%s\n", secret.substring(0, 4).c_str(), secret.substring(secret.length() - 4).c_str());
-  Serial.printf("[PROVISION] PoP: %d chars\n", pop.length());
-}
-
-// Load PoP attempt counter from NVS (survives reboot)
-void loadPopAttempts() {
-  prefs.begin("security", true);
-  popAttempts = prefs.getInt("pop_attempts", 0);
-  uint32_t lockoutTime = prefs.getUInt("pop_lockout", 0);
-  prefs.end();
-
-  // If lockout was set, keep it active
-  if (popAttempts >= MAX_POP_ATTEMPTS) {
-    popLockedOut = true;
-    popLockoutStart = millis();
-    Serial.printf("[SECURITY] PoP locked out (%d failed attempts)\n", popAttempts);
-  }
-}
-
-void savePopAttempts() {
-  prefs.begin("security", false);
-  prefs.putInt("pop_attempts", popAttempts);
-  prefs.end();
-}
-
-void resetPopAttempts() {
-  popAttempts = 0;
-  popLockedOut = false;
-  prefs.begin("security", false);
-  prefs.putInt("pop_attempts", 0);
-  prefs.end();
+  Serial.println("[PROVISION] Secret burned to NVS successfully!");
+  Serial.printf("[PROVISION] Secret: %s...%s\n",
+                secret.substring(0, 4).c_str(),
+                secret.substring(secret.length() - 4).c_str());
 }
 
 bool loadSettings() {
@@ -646,7 +613,6 @@ void handleRelay() {
     digitalWrite(RELAY_PIN, LOW);
     relayActive = false;
     Serial.println("[Relay] CLOSED (auto)");
-    addLog("Relay CLOSED (auto)", "info");
     if (currentState == STATE_ONLINE) setLED_online();
 
     // أبلغ السيرفر إن الباب قفل (QoS 1)
@@ -1684,39 +1650,20 @@ bool connectMQTT() {
 //    التطبيق يقدر يتحكم بدون كلاود
 // ══════════════════════════════════════
 
-// Verify Bearer token on local API requests
-// Token = mqttToken (received from server during inquiry, stored in NVS)
+// Local API gate (no Bearer token required).
+// Trust boundary = local Wi-Fi. The local HTTP server only listens on the
+// LAN interface and only on a configured device. "Configured" means the
+// device has already passed /devices/inquiry — at that point the cloud
+// allowlist accepted it and issued MQTT credentials. We use mqttUser as
+// the marker because pairingUserId is only set when the BLE provisioning
+// payload happens to include `userId` (older app builds may not send it).
 bool verifyLocalAuth() {
-  if (mqttToken.length() == 0) return true;  // No token set = dev mode (allow all)
-
-  const char* authHeaderKeys[] = {"Authorization"};
-  localServer.collectHeaders(authHeaderKeys, 1);
-  String authHeader = localServer.header("Authorization");
-
-  if (authHeader.length() == 0 || !authHeader.startsWith("Bearer ")) {
-    localServer.send(401, "application/json", "{\"status\":\"error\",\"message\":\"Authorization required\"}");
-    Serial.println("[LocalAPI] Rejected - no auth token");
+  if (mqttUser.length() == 0) {
+    localServer.send(403, "application/json",
+        "{\"status\":\"error\",\"message\":\"Device is not provisioned\"}");
+    Serial.println("[LocalAPI] Rejected - device not provisioned");
     return false;
   }
-
-  String token = authHeader.substring(7);
-  // Constant-time comparison
-  if (token.length() != mqttToken.length()) {
-    localServer.send(401, "application/json", "{\"status\":\"error\",\"message\":\"Invalid token\"}");
-    Serial.println("[LocalAPI] Rejected - invalid token");
-    return false;
-  }
-
-  volatile uint8_t result = 0;
-  for (size_t i = 0; i < token.length(); i++) {
-    result |= token[i] ^ mqttToken[i];
-  }
-  if (result != 0) {
-    localServer.send(401, "application/json", "{\"status\":\"error\",\"message\":\"Invalid token\"}");
-    Serial.println("[LocalAPI] Rejected - token mismatch");
-    return false;
-  }
-
   return true;
 }
 
@@ -1739,11 +1686,7 @@ void startLocalServer() {
     Serial.println("[mDNS] Failed to start");
   }
 
-  // Collect Authorization header for all requests
-  const char* headerKeys[] = {"Authorization"};
-  localServer.collectHeaders(headerKeys, 1);
-
-  // Local command endpoint (authenticated + rate limited)
+  // Local command endpoint (paired devices only + rate limited)
   localServer.on("/command", HTTP_POST, []() {
     if (!verifyLocalAuth()) return;
     if (!checkCommandRateLimit()) {
@@ -1797,14 +1740,14 @@ void startLocalServer() {
         return;
       }
       startRelayPulse();
-      addLog("Command: open (via local)", "info");
+      addLog("Local API: open command executed", "info");
       String response = "{\"status\":\"ok\",\"message\":\"Command executed locally\"}";
       rememberCommandRequest(requestId, response);
       localServer.send(200, "application/json", response);
       Serial.println("[LocalAPI] Command: open (local, authenticated)");
     }
     else if (action == "restart") {
-      addLog("Restart command (via local)", "warning");
+      addLog("Local API: restart command", "warning");
       String response = "{\"status\":\"ok\",\"message\":\"Restarting...\"}";
       rememberCommandRequest(requestId, response);
       localServer.send(200, "application/json", response);
@@ -1855,21 +1798,30 @@ void startLocalServer() {
     localServer.send(200, "application/json", response);
   });
 
-  // Local logs endpoint (authenticated)
+  // Local logs endpoint (paired devices only)
   localServer.on("/logs", HTTP_GET, []() {
     if (!verifyLocalAuth()) return;
 
-    // Build JSON array of logs (newest first) - use StaticJsonDocument
-    StaticJsonDocument<4096> doc;
-    JsonArray logsArr = doc.createNestedArray("logs");
-    doc["count"] = logCount;
-    doc["local"] = true;
+    // Build JSON array of logs (newest first).
+    // Each entry contains:
+    //   - epoch:    real unix seconds when NTP was synced, else 0
+    //   - uptimeMs: device millis() at the time of the event (always present)
+    //   - timestamp: kept as legacy alias of uptimeMs for older app builds
+    // The response also includes deviceUptimeMs / deviceEpoch so the app
+    // can convert millis() entries to wall-clock when epoch is 0.
+    DynamicJsonDocument doc(6144);
+    doc["count"]          = logCount;
+    doc["local"]          = true;
+    doc["deviceUptimeMs"] = millis();
+    doc["deviceEpoch"]    = ntpSynced ? (uint32_t)time(nullptr) : 0;
+    JsonArray logsArr     = doc.createNestedArray("logs");
 
-    // Read from circular buffer newest first
     for (int i = 0; i < logCount; i++) {
       int idx = (logHead - 1 - i + MAX_LOCAL_LOGS) % MAX_LOCAL_LOGS;
-      JsonObject entry = logsArr.createNestedObject();
-      entry["timestamp"] = localLogs[idx].timestamp;
+      JsonObject entry  = logsArr.createNestedObject();
+      entry["epoch"]     = localLogs[idx].epoch;
+      entry["uptimeMs"]  = localLogs[idx].uptimeMs;
+      entry["timestamp"] = localLogs[idx].uptimeMs;  // legacy field
       entry["message"]   = localLogs[idx].message;
       entry["type"]      = localLogs[idx].type;
     }
@@ -1879,11 +1831,13 @@ void startLocalServer() {
     localServer.send(200, "application/json", response);
   });
 
-  // CORS: restrict to Mnazilona app origin only (no wildcard)
+  // CORS: app talks to a different origin (mDNS host); allow native + web clients.
+  // The local server is LAN-only and gated on pairing — there is nothing to
+  // protect with a strict CORS policy here.
   auto handleLocalCORS = []() {
-    localServer.sendHeader("Access-Control-Allow-Origin", "app://mnazilona");
+    localServer.sendHeader("Access-Control-Allow-Origin", "*");
     localServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    localServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    localServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
     localServer.send(204);
   };
   localServer.on("/command", HTTP_OPTIONS, handleLocalCORS);
@@ -1908,28 +1862,6 @@ void stopLocalServer() {
 //      BLE PROVISIONING ENDPOINTS
 //  (replaces SoftAP HTTP provisioning)
 // ══════════════════════════════════════
-
-// Generate HMAC-SHA256 token (time-limited, derived from device secret)
-String generatePopToken() {
-  uint32_t bucket = millis() / 300000UL;
-  String data = String(SERIAL_NUMBER) + String(bucket);
-
-  unsigned char hmac[32];
-  mbedtls_md_context_t ctx;
-  mbedtls_md_init(&ctx);
-  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1);
-  mbedtls_md_hmac_starts(&ctx, (const unsigned char*)deviceSecret.c_str(), deviceSecret.length());
-  mbedtls_md_hmac_update(&ctx, (const unsigned char*)data.c_str(), data.length());
-  mbedtls_md_hmac_finish(&ctx, hmac);
-  mbedtls_md_free(&ctx);
-
-  char hexToken[65];
-  for (int i = 0; i < 32; i++) {
-    sprintf(&hexToken[i * 2], "%02x", hmac[i]);
-  }
-  hexToken[64] = '\0';
-  return String(hexToken);
-}
 
 // Helper: send a JSON string via BLE notify (handles chunking for large payloads)
 void bleNotify(BLECharacteristic* characteristic, const String& json) {
@@ -1981,87 +1913,22 @@ class BLEProvisioningServerCallbacks : public BLEServerCallbacks {
   }
 };
 
-// ── PoP Verify Callback ──
+// ── PoP Verify Callback (no-op compatibility shim) ──
+// PoP has been removed from the protocol. We keep this characteristic so
+// older apps can still complete the BLE handshake — any write returns
+// {"status":"ok"} and hands the deviceSecret to the app for backend pairing.
 class PopVerifyCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) override {
     bleLastActivity = millis();
-    String value = pCharacteristic->getValue().c_str();
-
-    StaticJsonDocument<128> doc;
-    if (deserializeJson(doc, value)) {
-      bleNotify(bleCharPopVerify, "{\"status\":\"error\",\"message\":\"Invalid JSON\"}");
-      return;
-    }
-
-    String code = doc["code"] | "";
-    code.trim();
-
-    // PoP lockout check (survives reboot via NVS)
-    if (popLockedOut) {
-      if (millis() - popLockoutStart < POP_LOCKOUT_MS) {
-        uint32_t remaining = (POP_LOCKOUT_MS - (millis() - popLockoutStart)) / 1000;
-        StaticJsonDocument<128> rDoc;
-        rDoc["status"] = "locked";
-        rDoc["message"] = "Too many attempts";
-        rDoc["retryAfterSec"] = remaining;
-        String response;
-        serializeJson(rDoc, response);
-        bleNotify(bleCharPopVerify, response);
-        return;
-      }
-      popLockedOut = false;
-      resetPopAttempts();
-    }
-
-    if (code.length() == 0 || code.length() > 32) {
-      bleNotify(bleCharPopVerify, "{\"status\":\"error\",\"message\":\"Invalid code length\"}");
-      return;
-    }
-
-    // Constant-time comparison to prevent timing attacks
-    bool match = false;
-    if (code.length() == popCode.length() && code.length() > 0) {
-      volatile uint8_t result = 0;
-      for (size_t i = 0; i < code.length(); i++) {
-        result |= code[i] ^ popCode[i];
-      }
-      match = (result == 0);
-    }
-
-    if (match) {
-      popVerified = true;
-      resetPopAttempts();
-      currentState = STATE_POP_VERIFIED;
-
-      // Send the real deviceSecret so the app can authenticate with the backend
-      // PoP already proved physical access; BLE link is encrypted
-      StaticJsonDocument<256> rDoc;
-      rDoc["status"]        = "ok";
-      rDoc["message"]       = "Verified";
-      rDoc["deviceSecret"]  = deviceSecret;
-      String response;
-      serializeJson(rDoc, response);
-      bleNotify(bleCharPopVerify, response);
-      Serial.println("[BLE] PoP VERIFIED");
-    } else {
-      popAttempts++;
-      savePopAttempts();
-      Serial.printf("[BLE] PoP FAILED (attempt %d/%d)\n", popAttempts, MAX_POP_ATTEMPTS);
-
-      if (popAttempts >= MAX_POP_ATTEMPTS) {
-        popLockedOut = true;
-        popLockoutStart = millis();
-        bleNotify(bleCharPopVerify, "{\"status\":\"locked\",\"message\":\"Too many attempts. Device locked.\"}");
-      } else {
-        StaticJsonDocument<128> rDoc;
-        rDoc["status"]       = "error";
-        rDoc["message"]      = "Wrong code";
-        rDoc["attemptsLeft"] = MAX_POP_ATTEMPTS - popAttempts;
-        String response;
-        serializeJson(rDoc, response);
-        bleNotify(bleCharPopVerify, response);
-      }
-    }
+    StaticJsonDocument<256> rDoc;
+    rDoc["status"]       = "ok";
+    rDoc["message"]      = "Verified";
+    rDoc["deviceSecret"] = deviceSecret;
+    String response;
+    serializeJson(rDoc, response);
+    bleNotify(bleCharPopVerify, response);
+    currentState = STATE_POP_VERIFIED;  // legacy state name; means "ready for WiFi config"
+    Serial.println("[BLE] Verified (PoP removed - auto-ack)");
   }
 };
 
@@ -2081,11 +1948,6 @@ class WiFiScanCallback : public BLECharacteristicCallbacks {
     String action = doc["action"] | "";
     if (action != "scan") {
       bleNotify(bleCharWifiScan, "{\"status\":\"error\",\"message\":\"Unknown action\"}");
-      return;
-    }
-
-    if (!popVerified) {
-      bleNotify(bleCharWifiScan, "{\"status\":\"error\",\"message\":\"Verification required first\"}");
       return;
     }
 
@@ -2133,11 +1995,6 @@ class WiFiConfigCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) override {
     bleLastActivity = millis();
     String value = pCharacteristic->getValue().c_str();
-
-    if (!popVerified) {
-      bleNotify(bleCharWifiConfig, "{\"status\":\"error\",\"message\":\"Verification required first\"}");
-      return;
-    }
 
     StaticJsonDocument<256> doc;
     if (deserializeJson(doc, value)) {
@@ -2245,7 +2102,7 @@ void startBLE() {
   infoDoc["name"]        = DEVICE_NAME;
   infoDoc["type"]        = "relay";
   infoDoc["fw"]          = FIRMWARE_VERSION;
-  infoDoc["popRequired"] = !popVerified;
+  infoDoc["popRequired"] = false;  // PoP removed; field kept for app compat
   String infoJson;
   serializeJson(infoDoc, infoJson);
   bleCharDeviceInfo->setValue(infoJson.c_str());
@@ -2349,41 +2206,97 @@ void stopAP()  { stopBLE();  }
 
 // ══════════════════════════════════════
 //            BUTTON
+// ──────────────────────────────────────
+//   2s hold  → reboot
+//   5s hold  → factory reset (returns to BLE pairing mode)
+//
+// The action fires on release, so a 5s factory reset never accidentally
+// triggers the 2s reboot first. The press is tracked across loop()
+// iterations (no blocking while-loop) so the watchdog stays fed.
 // ══════════════════════════════════════
 
-void handleButton() {
-  if (digitalRead(BUTTON_PIN) != LOW) return;
+#define BUTTON_DEBOUNCE_MS    50UL
+#define BUTTON_REBOOT_MS      2000UL
+#define BUTTON_RESET_MS       5000UL
 
-  uint32_t pressStart = millis();
-  while (digitalRead(BUTTON_PIN) == LOW) {
-    if (millis() - pressStart > 5000) {
-      Serial.println("[Button] FACTORY RESET");
-      setLED(true, true, true);
-      stopLocalServer();
-      if (mqttClient.connected()) {
-        mqttPublishStatus("offline");
-        mqttClient.disconnect();
-      }
-      clearAllSettings();
-      delay(500);
-      ESP.restart();
-    }
-    delay(50);
+static bool     buttonHeld         = false;
+static uint32_t buttonPressStartMs = 0;
+static uint32_t buttonLastEdgeMs   = 0;
+static uint8_t  buttonLedPhase     = 0;   // 0 = idle, 1 = >=2s feedback, 2 = >=5s feedback
+
+static void doFactoryReset() {
+  Serial.println("[Button] >>> FACTORY RESET (5s) — clearing config and restarting");
+  addLog("Factory reset (button 5s)", "warning");
+
+  setLED(true, true, true);  // solid white = factory reset
+  stopLocalServer();
+  if (mqttClient.connected()) {
+    mqttPublishStatus("offline");
+    mqttClient.disconnect();
+  }
+  clearAllSettings();         // wipes WiFi + MQTT credentials, keeps deviceSecret
+  delay(300);                 // let LED + serial flush
+  ESP.restart();              // device reboots into BLE provisioning (no settings)
+}
+
+static void doReboot() {
+  Serial.println("[Button] >>> REBOOT (2s)");
+  addLog("Reboot (button 2s)", "info");
+
+  setLED(false, false, true); // blue flash before reboot
+  if (mqttClient.connected()) {
+    mqttPublishStatus("offline");
+    mqttClient.disconnect();
+  }
+  delay(300);
+  ESP.restart();
+}
+
+void handleButton() {
+  bool pressed = (digitalRead(BUTTON_PIN) == LOW);
+  uint32_t now = millis();
+
+  // Edge detection with simple debounce
+  if (pressed && !buttonHeld) {
+    if (now - buttonLastEdgeMs < BUTTON_DEBOUNCE_MS) return;
+    buttonHeld         = true;
+    buttonPressStartMs = now;
+    buttonLastEdgeMs   = now;
+    buttonLedPhase     = 0;
+    Serial.println("[Button] Press start");
+    return;
   }
 
-  uint32_t dur = millis() - pressStart;
+  if (!pressed && buttonHeld) {
+    if (now - buttonLastEdgeMs < BUTTON_DEBOUNCE_MS) return;
+    uint32_t dur = now - buttonPressStartMs;
+    buttonHeld       = false;
+    buttonLastEdgeMs = now;
+    buttonLedPhase   = 0;
+    Serial.printf("[Button] Released after %lu ms\n", (unsigned long)dur);
 
-  if (dur > 2000 && dur <= 5000) {
-    if (currentState == STATE_ONLINE || currentState == STATE_WIFI_RECONNECTING) {
-      Serial.println("[Button] Medium press - AP re-config (PoP still required)");
-      popVerified = false;  // Force PoP re-verification for security
-      // Clean up running services before switching to AP
-      stopLocalServer();
-      if (mqttClient.connected()) {
-        mqttPublishStatus("offline");
-        mqttClient.disconnect();
-      }
-      startAP();
+    // Decide on release: longest threshold wins, so 5s does not trip 2s.
+    if (dur >= BUTTON_RESET_MS) {
+      doFactoryReset();
+    } else if (dur >= BUTTON_REBOOT_MS) {
+      doReboot();
+    }
+    return;
+  }
+
+  // While held: give visual feedback at each threshold so the user knows
+  // when to release. We do NOT trigger any action here — actions fire on
+  // release only.
+  if (pressed && buttonHeld) {
+    uint32_t dur = now - buttonPressStartMs;
+    if (dur >= BUTTON_RESET_MS && buttonLedPhase < 2) {
+      buttonLedPhase = 2;
+      setLED(true, true, true);  // solid white: release now for factory reset
+      Serial.println("[Button] 5s threshold — release for FACTORY RESET");
+    } else if (dur >= BUTTON_REBOOT_MS && buttonLedPhase < 1) {
+      buttonLedPhase = 1;
+      setLED(false, false, true); // solid blue: release for reboot
+      Serial.println("[Button] 2s threshold — release for REBOOT");
     }
   }
 }
@@ -2575,18 +2488,17 @@ void setup() {
   // Command: PROVISION:secret=<hex32>,pop=<code>
   // ═══════════════════════════════════════
   bool secretsLoaded = loadSecrets();
-  loadPopAttempts();
 
   if (!secretsLoaded) {
     Serial.println("\n╔══════════════════════════════════════════╗");
     Serial.println("║  DEVICE NOT PROVISIONED                  ║");
     Serial.println("║  Send via Serial:                        ║");
-    Serial.println("║  PROVISION:secret=<32+hex>,pop=<6+chars> ║");
+    Serial.println("║  PROVISION:secret=<32+hex>               ║");
     Serial.println("╚══════════════════════════════════════════╝\n");
 
     // Wait for provisioning via Serial (blocking until provisioned)
     setLED_error();
-    while (deviceSecret.length() == 0 || popCode.length() == 0) {
+    while (deviceSecret.length() == 0) {
       checkSerialProvisioning();
       delay(100);
     }

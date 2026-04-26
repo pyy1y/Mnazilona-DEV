@@ -1,18 +1,17 @@
 // utils/localDiscovery.ts
-// mDNS discovery for local ESP32 devices + local HTTP communication
-// Handles: commands, status polling, logs — all without internet
+// mDNS discovery for local ESP32 devices + local HTTP communication.
+// Handles commands, status polling, and logs — all over the LAN with no
+// internet dependency. The local protocol does not require an Authorization
+// header: the device is gated by being paired to a user, and the local HTTP
+// server only listens on the local Wi-Fi interface.
 
 import Zeroconf from 'react-native-zeroconf';
-import { TokenManager } from './api';
 
 const LOCAL_TIMEOUT = 5000;
 
-async function getAuthHeaders(): Promise<Record<string, string>> {
-  const token = await TokenManager.get();
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  return headers;
-}
+const LOCAL_HEADERS: Record<string, string> = {
+  'Content-Type': 'application/json',
+};
 
 export type LocalDevice = {
   serialNumber: string;
@@ -39,7 +38,7 @@ export type LocalDeviceStatus = {
 };
 
 export type LocalLogEntry = {
-  timestamp: number;   // millis from ESP32
+  timestamp: number;   // unix epoch in milliseconds (resolved from device epoch when possible)
   message: string;
   type: 'info' | 'warning' | 'error';
 };
@@ -174,10 +173,9 @@ export async function sendLocalCommand(
   const timeoutId = setTimeout(() => controller.abort(), LOCAL_TIMEOUT);
 
   try {
-    const headers = await getAuthHeaders();
     const response = await fetch(`http://${device.ip}:${device.port}/command`, {
       method: 'POST',
-      headers,
+      headers: LOCAL_HEADERS,
       body: JSON.stringify({ command, params: params || {}, requestId }),
       signal: controller.signal,
     });
@@ -210,10 +208,9 @@ export async function fetchLocalStatus(
   const timeoutId = setTimeout(() => controller.abort(), LOCAL_TIMEOUT);
 
   try {
-    const headers = await getAuthHeaders();
     const response = await fetch(`http://${device.ip}:${device.port}/status`, {
       method: 'GET',
-      headers,
+      headers: LOCAL_HEADERS,
       signal: controller.signal,
     });
 
@@ -245,10 +242,9 @@ export async function fetchLocalLogs(
   const timeoutId = setTimeout(() => controller.abort(), LOCAL_TIMEOUT);
 
   try {
-    const headers = await getAuthHeaders();
     const response = await fetch(`http://${device.ip}:${device.port}/logs`, {
       method: 'GET',
-      headers,
+      headers: LOCAL_HEADERS,
       signal: controller.signal,
     });
 
@@ -256,8 +252,14 @@ export async function fetchLocalLogs(
     if (!response.ok) return { success: false, logs: [] };
 
     const data = await response.json().catch(() => null);
+    const deviceUptimeMs: number = data?.deviceUptimeMs || 0;
+    const deviceEpochSec: number = data?.deviceEpoch || 0;
+
     const logs: LocalLogEntry[] = (data?.logs || []).map((log: any) => ({
-      timestamp: log.timestamp || 0,
+      // Prefer the firmware's real epoch (in seconds, NTP-synced) when present.
+      // Fall back to converting the device-uptime timestamp using the device's
+      // current uptime + wall-clock at the time of the request.
+      timestamp: resolveLogTimestampMs(log, deviceUptimeMs, deviceEpochSec),
       message: log.message || '',
       type: log.type || 'info',
     }));
@@ -267,6 +269,31 @@ export async function fetchLocalLogs(
     clearTimeout(timeoutId);
     return { success: false, logs: [] };
   }
+}
+
+// Convert a firmware log entry to a millisecond unix epoch.
+// Order of preference:
+//   1. log.epoch (real, NTP-synced)
+//   2. log.uptimeMs vs deviceEpoch (NTP synced for current time)
+//   3. log.uptimeMs vs phone clock (best-effort fallback)
+function resolveLogTimestampMs(
+  log: any,
+  deviceUptimeMs: number,
+  deviceEpochSec: number,
+): number {
+  if (log?.epoch && log.epoch > 0) return log.epoch * 1000;
+
+  const logUptime: number = log?.uptimeMs ?? log?.timestamp ?? 0;
+  if (!logUptime) return Date.now();
+
+  if (deviceEpochSec > 0 && deviceUptimeMs > 0) {
+    const ageMs = deviceUptimeMs - logUptime;
+    return deviceEpochSec * 1000 - ageMs;
+  }
+
+  // No device epoch — derive from phone clock.
+  const ageMs = deviceUptimeMs > 0 ? deviceUptimeMs - logUptime : 0;
+  return Date.now() - ageMs;
 }
 
 // ======================================

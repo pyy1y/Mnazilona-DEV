@@ -1,16 +1,16 @@
 // app/pairing.tsx
 // ═══════════════════════════════════════════════════════════════
-// BLE Provisioning — replaces SoftAP WiFi Provisioning
+// BLE Provisioning — no PoP code
 //
 // Flow:
 //   1. Scan for nearby Mnazilona BLE devices
-//   2. Select and connect to device
-//   3. Verify Proof of Possession code
-//   4. Device scans WiFi networks → app shows sorted list (2.4GHz)
-//   5. User selects network and enters password
-//   6. Credentials sent to device over BLE
-//   7. Device connects to WiFi, does server inquiry
-//   8. App pairs with backend server
+//   2. Select and connect to device  → device hands the deviceSecret
+//      back over the BLE link (no user-entered code required)
+//   3. Device scans WiFi networks → app shows sorted list (2.4GHz)
+//   4. User selects network and enters password
+//   5. Credentials sent to device over BLE
+//   6. Device connects to WiFi, does server inquiry
+//   7. App pairs with backend server (deviceSecret + auth token)
 //
 // المكتبة المطلوبة:
 //   npx expo install react-native-ble-plx
@@ -40,7 +40,6 @@ const BRAND = "#2E5B8E";
 type PairingStep =
   | "scan_devices"    // BLE scanning for nearby devices
   | "connecting_ble"  // Connecting to selected BLE device
-  | "enter_pop"       // Verify PoP code
   | "scanning_wifi"   // Device is scanning WiFi networks
   | "select_wifi"     // User picks a network from the list
   | "enter_password"  // User enters WiFi password
@@ -57,15 +56,12 @@ export default function PairingScreen() {
   const ble = useBLEProvisioning();
 
   const [step, setStep] = useState<PairingStep>("scan_devices");
-  const [popCode, setPopCode] = useState("");
   const [selectedWifi, setSelectedWifi] = useState<WiFiNetwork | null>(null);
   const [password, setPassword] = useState("");
   const [wifiNetworks, setWifiNetworks] = useState<WiFiNetwork[]>([]);
   const [loading, setLoading] = useState(false);
   const [statusText, setStatusText] = useState("");
   const [errorText, setErrorText] = useState("");
-  const [serialNumber, _setSerialNumber] = useState("");
-  const [deviceName, setDeviceName] = useState("");
 
   // Refs for async chain safety
   const serialNumberRef = useRef("");
@@ -75,7 +71,6 @@ export default function PairingScreen() {
 
   const setSerialNumberSynced = (value: string) => {
     serialNumberRef.current = value;
-    _setSerialNumber(value);
   };
   const setDeviceSecretSynced = (value: string) => {
     deviceSecretRef.current = value;
@@ -128,60 +123,37 @@ export default function PairingScreen() {
 
     const info = await ble.connectToDevice(device.id);
 
-    if (info) {
-      setSerialNumberSynced(info.serial);
-      setDeviceName(info.name || "Mnazilona Device");
-      setLoading(false);
-
-      if (info.popRequired) {
-        setStep("enter_pop");
-      } else {
-        // PoP already verified (unlikely on fresh device, but handle it)
-        startWiFiScan();
-      }
-    } else {
+    if (!info) {
       setLoading(false);
       setErrorText(ble.error || "Failed to connect to device.");
       setStep("error");
-    }
-  };
-
-  // ═══════════════════════════════════════
-  // Step 2: Verify PoP Code
-  // ═══════════════════════════════════════
-  const verifyPop = async () => {
-    if (!popCode || popCode.length < 4) {
-      return Alert.alert("Code Required", "Enter the code shown on the device sticker.");
+      return;
     }
 
-    setLoading(true);
-    setStatusText("Verifying code...");
+    setSerialNumberSynced(info.serial);
 
-    const { success, data } = await ble.verifyPopCode(popCode);
-
-    if (success) {
-      // The device returns the real deviceSecret after PoP verification
-      const secret = data.deviceSecret || data.device_secret || data.secret;
+    // Pull the deviceSecret from the BLE compatibility characteristic.
+    // PoP is gone, but the firmware still answers a write to the legacy
+    // verify characteristic with {status:"ok", deviceSecret:"..."}.
+    try {
+      const result = await ble.fetchDeviceSecret();
+      const secret =
+        result.data?.deviceSecret || result.data?.device_secret || result.data?.secret;
       if (secret) {
         setDeviceSecretSynced(secret);
-        if (__DEV__) console.log("[Pairing] Got deviceSecret from verify");
+      } else if (__DEV__) {
+        console.warn("[Pairing] Device did not return a secret over BLE");
       }
-      setLoading(false);
-      if (__DEV__) console.log("[Pairing] PoP verified!");
-      startWiFiScan();
-    } else if (data.status === "locked") {
-      setLoading(false);
-      Alert.alert("Locked", data.message || "Too many attempts. Wait and try again.");
-    } else {
-      setLoading(false);
-      const attemptsLeft = data.attemptsLeft || "?";
-      Alert.alert("Wrong Code", `Incorrect code. ${attemptsLeft} attempts remaining.`);
-      setPopCode("");
+    } catch (e: any) {
+      if (__DEV__) console.warn("[Pairing] fetchDeviceSecret failed:", e?.message);
     }
+
+    setLoading(false);
+    startWiFiScan();
   };
 
   // ═══════════════════════════════════════
-  // Step 3: Request WiFi Scan from Device
+  // Step 2: Request WiFi Scan from Device
   // ═══════════════════════════════════════
   const startWiFiScan = async () => {
     setStep("scanning_wifi");
@@ -469,18 +441,17 @@ export default function PairingScreen() {
 
         {/* Step Indicator */}
         <View style={styles.steps}>
-          {["Scan", "Verify", "WiFi", "Done"].map((label, i) => {
+          {["Scan", "WiFi", "Done"].map((label, i) => {
             const stepIndex =
               ["scan_devices", "connecting_ble"].includes(step) ? 0
-              : step === "enter_pop" ? 1
-              : ["scanning_wifi", "select_wifi", "enter_password", "provisioning"].includes(step) ? 2
-              : 3;
+              : ["scanning_wifi", "select_wifi", "enter_password", "provisioning"].includes(step) ? 1
+              : 2;
             const isActive = i <= stepIndex;
             return (
               <View key={label} style={styles.stepRow}>
                 <View style={[styles.stepDot, isActive && styles.stepDotActive]} />
                 <Text style={[styles.stepLabel, isActive && styles.stepLabelActive]}>{label}</Text>
-                {i < 3 && <View style={[styles.stepLine, isActive && styles.stepLineActive]} />}
+                {i < 2 && <View style={[styles.stepLine, isActive && styles.stepLineActive]} />}
               </View>
             );
           })}
@@ -563,42 +534,6 @@ export default function PairingScreen() {
             <ActivityIndicator size="large" color={BRAND} />
             <Text style={[styles.h2, { marginTop: 20 }]}>Connecting to Device</Text>
             <Text style={styles.statusText}>{statusText}</Text>
-          </View>
-        )}
-
-        {/* ──── STEP 2: ENTER POP ──── */}
-        {step === "enter_pop" && (
-          <View>
-            <View style={styles.center}>
-              <MaterialCommunityIcons name="shield-lock" size={50} color={BRAND} />
-              {deviceName ? (
-                <Text style={styles.deviceLabel}>{deviceName} ({serialNumber})</Text>
-              ) : null}
-            </View>
-            <Text style={styles.h2}>Device Verification</Text>
-            <Text style={styles.p}>
-              Enter the code found on the sticker on your device or inside the box.
-            </Text>
-
-            <Text style={styles.label}>Verification Code</Text>
-            <TextInput
-              style={styles.inputCode}
-              value={popCode}
-              onChangeText={setPopCode}
-              placeholder="123456"
-              keyboardType="number-pad"
-              maxLength={8}
-              textAlign="center"
-              autoFocus
-            />
-
-            <TouchableOpacity
-              style={[styles.btnMain, loading && styles.btnDisabled]}
-              onPress={verifyPop}
-              disabled={loading}
-            >
-              {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnTxt}>Verify</Text>}
-            </TouchableOpacity>
           </View>
         )}
 

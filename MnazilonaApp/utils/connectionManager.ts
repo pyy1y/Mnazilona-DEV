@@ -217,41 +217,22 @@ function formatTimestamp(date: Date): string {
   });
 }
 
-/**
- * Convert ESP32 millis() timestamp to real date/time.
- * Formula: realTime = now - (deviceUptime - logTimestamp)
- * deviceUptime and logTimestamp are both in millis() from boot.
- */
-function millisToRealTime(logMillis: number, deviceUptimeMs: number): Date {
-  const age = deviceUptimeMs - logMillis; // how long ago this event happened
-  return new Date(Date.now() - age);
-}
-
 export async function smartFetchLogs(
   serialNumber: string
 ): Promise<LogsResult> {
-  // Try local first
+  // Try local first. The firmware now returns log timestamps as real epoch ms
+  // (resolved by localDiscovery using NTP epoch when available, otherwise
+  // derived from device uptime + phone clock), so no extra status round-trip
+  // is needed.
   if (isDeviceLocal(serialNumber)) {
-    // First get device uptime so we can convert millis to real time
-    const statusResult = await fetchLocalStatus(serialNumber);
-    const deviceUptimeMs = statusResult.success && statusResult.data?.uptime
-      ? statusResult.data.uptime * 1000  // uptime is in seconds from ESP32
-      : 0;
-
     const localResult = await fetchLocalLogs(serialNumber);
 
     if (localResult.success && localResult.logs.length > 0) {
-      const logs: LogEntry[] = localResult.logs.map((log) => {
-        const realDate = deviceUptimeMs > 0
-          ? millisToRealTime(log.timestamp, deviceUptimeMs)
-          : new Date(); // fallback if no uptime
-
-        return {
-          timestamp: formatTimestamp(realDate),
-          message: log.message,
-          type: log.type,
-        };
-      });
+      const logs: LogEntry[] = localResult.logs.map((log) => ({
+        timestamp: formatTimestamp(new Date(log.timestamp)),
+        message: log.message,
+        type: log.type,
+      }));
 
       return { success: true, local: true, logs };
     }

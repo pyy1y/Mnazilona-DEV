@@ -1,6 +1,6 @@
 // hooks/useBLEProvisioning.ts
 // ═══════════════════════════════════════════════════════════════
-// BLE Provisioning Hook — replaces WiFi AP pairing
+// BLE Provisioning Hook — no PoP code
 //
 // Uses react-native-ble-plx (already installed in package.json)
 // to communicate with Mnazilona ESP32 devices during setup.
@@ -9,7 +9,7 @@
 //   1. Scan for BLE devices advertising the Mnazilona service UUID
 //   2. Connect to selected device
 //   3. Read device info
-//   4. Verify PoP code
+//   4. Fetch deviceSecret over the BLE link (no user-entered code)
 //   5. Request WiFi scan (device scans, returns results via BLE)
 //   6. Send WiFi credentials
 //   7. Device connects to WiFi and proceeds to server inquiry
@@ -22,7 +22,10 @@ import { BleManager, Device, Characteristic, BleError } from "react-native-ble-p
 // Must match the ESP32 firmware UUIDs exactly
 const SERVICE_UUID       = "4d4e5a00-4c4f-4e41-0001-000000000000";
 const CHAR_DEVICE_INFO   = "4d4e5a00-4c4f-4e41-0001-000000000001";
-const CHAR_POP_VERIFY    = "4d4e5a00-4c4f-4e41-0001-000000000002";
+// CHAR_VERIFY is the legacy PoP-verify characteristic. PoP is gone, but the
+// firmware still uses it as the channel that hands the deviceSecret back to
+// the app — write any payload, read the secret out of the notify response.
+const CHAR_VERIFY        = "4d4e5a00-4c4f-4e41-0001-000000000002";
 const CHAR_WIFI_SCAN     = "4d4e5a00-4c4f-4e41-0001-000000000003";
 const CHAR_WIFI_CONFIG   = "4d4e5a00-4c4f-4e41-0001-000000000004";
 // const CHAR_STATUS     = "4d4e5a00-4c4f-4e41-0001-000000000005";
@@ -397,12 +400,15 @@ export function useBLEProvisioning() {
     []
   );
 
-  // ── Verify PoP Code ──
-  const verifyPopCode = useCallback(async (code: string): Promise<{ success: boolean; data: any }> => {
+  // ── Fetch deviceSecret over BLE ──
+  // Triggers the legacy verify characteristic with an empty payload; the
+  // firmware responds with {status:"ok", deviceSecret:"..."} which the app
+  // forwards to the backend during pairing.
+  const fetchDeviceSecret = useCallback(async (): Promise<{ success: boolean; data: any }> => {
     try {
       const response = await writeAndWaitForNotify(
-        CHAR_POP_VERIFY,
-        JSON.stringify({ code: code.trim() })
+        CHAR_VERIFY,
+        JSON.stringify({})
       );
       const data = JSON.parse(response);
       return { success: data.status === "ok", data };
@@ -477,7 +483,7 @@ export function useBLEProvisioning() {
     startScan,
     stopScan,
     connectToDevice,
-    verifyPopCode,
+    fetchDeviceSecret,
     requestWiFiScan,
     sendWiFiConfig,
     disconnect,
