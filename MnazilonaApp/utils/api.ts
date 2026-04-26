@@ -28,6 +28,7 @@ interface RequestOptions {
   timeout?: number;
   signal?: AbortSignal;
   requireAuth?: boolean;
+  skipAuthExpiredHandler?: boolean;
 }
 
 // ======================================
@@ -127,6 +128,7 @@ export async function apiRequest<T = any>(
     timeout = APP_CONFIG.REQUEST_TIMEOUT,
     signal,
     requireAuth = false,
+    skipAuthExpiredHandler = false,
   } = options;
 
   // Create abort controller for timeout
@@ -171,7 +173,13 @@ export async function apiRequest<T = any>(
 
     if (!response.ok) {
       // Auto-logout on 401: token expired or invalidated
-      if (response.status === 401 && requireAuth && onAuthExpired) {
+      // Skip when explicitly disabled (e.g. the logout call itself) to avoid recursion.
+      if (
+        response.status === 401 &&
+        requireAuth &&
+        !skipAuthExpiredHandler &&
+        onAuthExpired
+      ) {
         onAuthExpired();
       }
 

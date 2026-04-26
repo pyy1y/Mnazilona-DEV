@@ -143,17 +143,39 @@ export async function login(
   }
 }
 
-export async function logout(): Promise<void> {
-  // Invalidate token server-side (best-effort, don't block on failure)
-  try {
-    await api.post(ENDPOINTS.AUTH.LOGOUT, {}, { requireAuth: true });
-  } catch {
-    // Non-fatal: local cleanup proceeds even if server call fails
-  }
+let logoutInFlight: Promise<void> | null = null;
 
-  await UserDataManager.clear();
-  await TokenManager.remove();
-  await clearUser();
+export async function logout(): Promise<void> {
+  // Coalesce concurrent calls so we never enter the 401 → logout → 401 loop.
+  if (logoutInFlight) return logoutInFlight;
+
+  logoutInFlight = (async () => {
+    try {
+      const token = await TokenManager.get();
+      // Only call the server if we still hold a usable token; otherwise the
+      // server would just return 401 and we'd re-trigger the auth handler.
+      if (token && !isTokenExpired(token)) {
+        try {
+          await api.post(ENDPOINTS.AUTH.LOGOUT, {}, {
+            requireAuth: true,
+            skipAuthExpiredHandler: true,
+          });
+        } catch {
+          // Non-fatal: local cleanup proceeds even if server call fails
+        }
+      }
+    } finally {
+      await UserDataManager.clear();
+      await TokenManager.remove();
+      await clearUser();
+    }
+  })();
+
+  try {
+    await logoutInFlight;
+  } finally {
+    logoutInFlight = null;
+  }
 }
 
 // ======================================
