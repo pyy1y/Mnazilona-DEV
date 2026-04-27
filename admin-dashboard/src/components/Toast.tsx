@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useState, useCallback, ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, useMemo, ReactNode } from 'react';
 import { CheckCircle, XCircle, AlertTriangle, Info, X } from 'lucide-react';
 
 type ToastType = 'success' | 'error' | 'warning' | 'info';
@@ -59,15 +59,20 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     }
   }, [removeToast]);
 
-  const toast = {
+  // Stable toast object — recreating it on every render would re-trigger every
+  // useEffect/useCallback that lists `toast` as a dependency, causing pages to
+  // refetch on every notification (including auto-dismissals).
+  const toast = useMemo(() => ({
     success: (message: string) => addToast('success', message),
     error: (message: string) => addToast('error', message, 6000),
     warning: (message: string) => addToast('warning', message, 5000),
     info: (message: string) => addToast('info', message),
-  };
+  }), [addToast]);
+
+  const contextValue = useMemo(() => ({ toast }), [toast]);
 
   return (
-    <ToastContext.Provider value={{ toast }}>
+    <ToastContext.Provider value={contextValue}>
       {children}
       {/* Toast container */}
       <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2 max-w-sm w-full pointer-events-none">

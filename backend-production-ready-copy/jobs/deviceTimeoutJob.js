@@ -1,5 +1,6 @@
 const Device = require('../models/Device');
 const DeviceLog = require('../models/DeviceLog');
+const { emitToAdmins } = require('../config/socket');
 
 const HEARTBEAT_TIMEOUT_MS = parseInt(process.env.HEARTBEAT_TIMEOUT_MS, 10) || 2 * 60 * 1000;
 const CHECK_INTERVAL_MS = parseInt(process.env.DEVICE_CHECK_INTERVAL_MS, 10) || 60 * 1000;
@@ -16,7 +17,7 @@ const checkDeviceTimeouts = async () => {
 
     const timedOutDevices = await Device.find(
       { isOnline: true, lastSeen: { $lt: cutoffTime } },
-      { serialNumber: 1 }
+      { serialNumber: 1, lastSeen: 1, deviceType: 1, name: 1 }
     ).lean();
 
     const result = await Device.updateMany(
@@ -34,6 +35,18 @@ const checkDeviceTimeouts = async () => {
         source: 'server',
       }));
       await DeviceLog.insertMany(logs);
+
+      // Notify admin dashboards so live counts and per-device status badges
+      // update immediately, instead of staying stale until a manual refresh.
+      for (const d of timedOutDevices) {
+        emitToAdmins('device:status', {
+          serialNumber: d.serialNumber,
+          isOnline: false,
+          lastSeen: d.lastSeen,
+          deviceType: d.deviceType,
+          name: d.name,
+        });
+      }
     }
   } catch (error) {
     console.error('Device timeout job error:', error.message);

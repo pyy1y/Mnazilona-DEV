@@ -9,6 +9,8 @@ import {
   unlockDevice,
   unpairDevice,
   factoryResetDevice,
+  transferDevice,
+  getUsers,
 } from '@/lib/api';
 import { useToast } from '@/components/Toast';
 import { getErrorMessage } from '@/lib/types';
@@ -17,8 +19,9 @@ import { useSocket } from '@/lib/socket';
 import StatusBadge from '@/components/StatusBadge';
 import {
   ArrowLeft, Wifi, WifiOff, Lock, Unlock, Terminal, Unplug,
-  RotateCcw, RefreshCw, Zap, Power, Info, Shield,
+  RotateCcw, RefreshCw, Zap, Power, Info, Shield, ArrowRightLeft, Search,
 } from 'lucide-react';
+import { useDebounce } from '@/lib/hooks';
 import { formatDistanceToNow } from 'date-fns';
 
 interface DeviceDetail {
@@ -54,6 +57,19 @@ interface LatestFirmware {
   deviceType: string;
 }
 
+interface UserSearchResult {
+  id: string;
+  name: string;
+  email: string;
+}
+
+interface OtaSnapshot {
+  status: string;
+  targetVersion: string | null;
+  progress: number;
+  error: string | null;
+}
+
 // Debounce guard for commands (prevent rapid clicks)
 const COMMAND_COOLDOWN = 2000;
 
@@ -80,6 +96,16 @@ export default function DeviceDetailPage() {
   // Confirm dialog state
   const [confirmDialog, setConfirmDialog] = useState<'unpair' | 'factory-reset' | null>(null);
 
+  // Transfer modal state
+  const [showTransferModal, setShowTransferModal] = useState(false);
+  const [transferSearch, setTransferSearch] = useState('');
+  const debouncedTransferSearch = useDebounce(transferSearch, 300);
+  const [transferResults, setTransferResults] = useState<UserSearchResult[]>([]);
+  const [transferTarget, setTransferTarget] = useState<UserSearchResult | null>(null);
+
+  // Live OTA snapshot, layered on top of whatever was in the most recent fetch
+  const [otaLive, setOtaLive] = useState<OtaSnapshot | null>(null);
+
   const fetchDetail = useCallback(async () => {
     try {
       const res = await getDeviceDetail(serial);
@@ -97,14 +123,74 @@ export default function DeviceDetailPage() {
 
   // Real-time status updates for this device
   useEffect(() => {
-    const off = on('device:status', (event: unknown) => {
-      const e = event as { serialNumber: string; isOnline: boolean; lastSeen: string };
-      if (e.serialNumber === serial) {
-        setDevice((prev) => prev ? { ...prev, isOnline: e.isOnline, lastSeen: e.lastSeen || prev.lastSeen } : prev);
+    const offStatus = on('device:status', (event) => {
+      if (event.serialNumber === serial) {
+        setDevice((prev) => prev
+          ? { ...prev, isOnline: event.isOnline, lastSeen: event.lastSeen || prev.lastSeen }
+          : prev);
       }
     });
-    return off;
-  }, [on, serial]);
+    // Mirror device dp_report payloads into device.state so the State card stays
+    // current without a refetch while the user is on the page.
+    const offDp = on('device:dp_report', (event) => {
+      if (event.serialNumber !== serial) return;
+      setDevice((prev) => prev
+        ? { ...prev, state: { ...(prev.state || {}), ...(event.payload || {}) } }
+        : prev);
+    });
+    const offHb = on('device:heartbeat', (event) => {
+      if (event.serialNumber !== serial) return;
+      setDevice((prev) => prev
+        ? { ...prev, isOnline: true, lastSeen: event.lastSeen || prev.lastSeen }
+        : prev);
+    });
+    const offOta = on('ota:progress', (event) => {
+      if (event.serialNumber !== serial) return;
+      setOtaLive({
+        status: event.status,
+        targetVersion: event.version || null,
+        progress: typeof event.progress === 'number' ? event.progress : 0,
+        error: event.error || null,
+      });
+      // On a successful OTA the firmware version on the device changes — refetch
+      // so the "Update available" badge resolves correctly.
+      if (event.status === 'success') fetchDetail();
+    });
+    return () => { offStatus(); offDp(); offHb(); offOta(); };
+  }, [on, serial, fetchDetail]);
+
+  // Search for transfer target users (debounced)
+  useEffect(() => {
+    if (!showTransferModal) return;
+    const params: Record<string, string | number> = { limit: 10 };
+    if (debouncedTransferSearch) params.search = debouncedTransferSearch;
+    let cancelled = false;
+    getUsers(params)
+      .then((res) => {
+        if (cancelled) return;
+        const users = (res.data?.users || []) as UserSearchResult[];
+        setTransferResults(users.filter((u) => u.id !== device?.owner?._id));
+      })
+      .catch(() => { if (!cancelled) setTransferResults([]); });
+    return () => { cancelled = true; };
+  }, [debouncedTransferSearch, showTransferModal, device?.owner?._id]);
+
+  const handleTransfer = async () => {
+    if (!transferTarget) return;
+    setActionLoading(true);
+    try {
+      await transferDevice(serial, transferTarget.id);
+      toast.success(`Transferred to ${transferTarget.email}`);
+      setShowTransferModal(false);
+      setTransferTarget(null);
+      setTransferSearch('');
+      fetchDetail();
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to transfer device'));
+    } finally {
+      setActionLoading(false);
+    }
+  };
 
   const handleCommand = async (cmd: string) => {
     // Command cooldown
@@ -256,7 +342,7 @@ export default function DeviceDetailPage() {
         </div>
         <div className="bg-white rounded-xl border border-gray-200 p-4">
           <p className="text-xs text-gray-500 mb-1">Firmware</p>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <p className="text-sm font-medium font-mono">{device.firmwareVersion || 'Unknown'}</p>
             {needsUpdate && (
               <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full text-xs">
@@ -264,6 +350,19 @@ export default function DeviceDetailPage() {
               </span>
             )}
           </div>
+          {otaLive && otaLive.status !== 'idle' && (
+            <div className="mt-2 text-xs">
+              <div className="flex items-center justify-between text-gray-600">
+                <span className="capitalize">OTA: {otaLive.status.replace('_', ' ')} {otaLive.targetVersion ? `→ ${otaLive.targetVersion}` : ''}</span>
+                <span>{otaLive.progress}%</span>
+              </div>
+              <div className="w-full h-1.5 bg-gray-100 rounded-full mt-1 overflow-hidden">
+                <div className={`h-full rounded-full transition-all ${otaLive.status === 'failed' || otaLive.status === 'rolled_back' ? 'bg-red-500' : 'bg-blue-600'}`}
+                  style={{ width: `${Math.max(0, Math.min(100, otaLive.progress))}%` }} />
+              </div>
+              {otaLive.error && <p className="text-red-500 mt-1">{otaLive.error}</p>}
+            </div>
+          )}
         </div>
         <div className="bg-white rounded-xl border border-gray-200 p-4">
           <p className="text-xs text-gray-500 mb-1">Owner</p>
@@ -351,12 +450,18 @@ export default function DeviceDetailPage() {
         {/* Danger Zone */}
         <div className="mt-6 pt-6 border-t border-gray-200">
           <p className="text-sm font-medium text-gray-500 mb-3">Danger Zone</p>
-          <div className="flex gap-3">
+          <div className="flex flex-wrap gap-3">
             {device.owner && (
-              <button onClick={() => setConfirmDialog('unpair')} disabled={actionLoading}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg border border-yellow-300 text-yellow-700 hover:bg-yellow-50 text-sm font-medium disabled:opacity-50">
-                <Unplug size={16} /> Unpair
-              </button>
+              <>
+                <button onClick={() => setShowTransferModal(true)} disabled={actionLoading}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg border border-blue-300 text-blue-700 hover:bg-blue-50 text-sm font-medium disabled:opacity-50">
+                  <ArrowRightLeft size={16} /> Transfer Owner
+                </button>
+                <button onClick={() => setConfirmDialog('unpair')} disabled={actionLoading}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg border border-yellow-300 text-yellow-700 hover:bg-yellow-50 text-sm font-medium disabled:opacity-50">
+                  <Unplug size={16} /> Unpair
+                </button>
+              </>
             )}
             <button onClick={() => setConfirmDialog('factory-reset')} disabled={actionLoading}
               className="flex items-center gap-2 px-4 py-2 rounded-lg border border-red-300 text-red-700 hover:bg-red-50 text-sm font-medium disabled:opacity-50">
@@ -461,6 +566,52 @@ export default function DeviceDetailPage() {
                 className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50">Send</button>
               <button onClick={() => { setCommandModal(false); setCommand(''); }}
                 className="flex-1 bg-gray-100 text-gray-700 py-2.5 rounded-lg font-medium hover:bg-gray-200">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Transfer Ownership Modal */}
+      {showTransferModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-md mx-4">
+            <h3 className="text-lg font-semibold mb-1">Transfer Device</h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Currently owned by{' '}
+              <span className="font-medium">{device.owner?.email || '(unpaired)'}</span>.
+              Search for the new owner.
+            </p>
+            <div className="relative mb-3">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
+              <input type="text" autoFocus
+                value={transferSearch}
+                onChange={(e) => { setTransferSearch(e.target.value); setTransferTarget(null); }}
+                placeholder="Search by name or email..."
+                className="w-full pl-9 pr-4 py-2.5 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div className="max-h-64 overflow-y-auto border border-gray-100 rounded-lg divide-y divide-gray-50">
+              {transferResults.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-6">No matching users</p>
+              ) : (
+                transferResults.map((u) => (
+                  <button key={u.id} type="button"
+                    onClick={() => setTransferTarget(u)}
+                    className={`w-full text-left px-4 py-2.5 hover:bg-gray-50 ${transferTarget?.id === u.id ? 'bg-blue-50' : ''}`}>
+                    <p className="text-sm font-medium">{u.name}</p>
+                    <p className="text-xs text-gray-500">{u.email}</p>
+                  </button>
+                ))
+              )}
+            </div>
+            <div className="flex gap-3 mt-5">
+              <button onClick={handleTransfer} disabled={!transferTarget || actionLoading}
+                className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50">
+                {actionLoading ? 'Transferring...' : 'Transfer'}
+              </button>
+              <button onClick={() => { setShowTransferModal(false); setTransferTarget(null); setTransferSearch(''); }}
+                className="flex-1 bg-gray-100 text-gray-700 py-2.5 rounded-lg font-medium hover:bg-gray-200">
+                Cancel
+              </button>
             </div>
           </div>
         </div>

@@ -129,10 +129,23 @@ export default function FirmwarePage() {
 
   useEffect(() => { fetchFirmwares(); fetchStats(); fetchOtaStatus(); }, [fetchFirmwares, fetchStats, fetchOtaStatus]);
 
-  // Real-time OTA progress updates
-  useSocketEvent('ota:progress', () => {
+  // Real-time OTA progress updates — handler must be stable so we don't
+  // re-subscribe on every render.
+  const handleOtaProgress = useCallback(() => {
     fetchOtaStatus();
-  });
+  }, [fetchOtaStatus]);
+  useSocketEvent('ota:progress', handleOtaProgress);
+
+  // Safety-net polling while updates are in-flight: if the broker drops a
+  // progress event we still converge to the right state within ~5s.
+  const activeOtaCount = otaDevices.filter(
+    (d) => !['idle', 'success', 'failed', 'rolled_back'].includes(d.otaStatus)
+  ).length;
+  useEffect(() => {
+    if (activeOtaCount === 0) return;
+    const id = setInterval(fetchOtaStatus, 5000);
+    return () => clearInterval(id);
+  }, [activeOtaCount, fetchOtaStatus]);
 
   const handleCreate = async () => {
     if (!form.version || !form.deviceType) return toast.warning('Version and device type are required');
@@ -218,8 +231,6 @@ export default function FirmwarePage() {
     setForm({ version: fw.version, deviceType: fw.deviceType, changelog: fw.changelog, isStable: fw.isStable });
     setFirmwareFile(null);
   };
-
-  const activeOtaCount = otaDevices.filter(d => !['idle', 'success', 'failed', 'rolled_back'].includes(d.otaStatus)).length;
 
   return (
     <div className="space-y-6">

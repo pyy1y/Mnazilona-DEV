@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { getDashboard } from '@/lib/api';
 import { useToast } from '@/components/Toast';
 import { getErrorMessage } from '@/lib/types';
@@ -21,9 +21,9 @@ interface DashboardData {
 interface DeviceStatusEvent {
   serialNumber: string;
   isOnline: boolean;
-  lastSeen: string;
-  deviceType: string;
-  name: string;
+  lastSeen?: string;
+  deviceType?: string;
+  name?: string;
 }
 
 export default function DashboardPage() {
@@ -40,22 +40,28 @@ export default function DashboardPage() {
       .finally(() => setLoading(false));
   }, [toast]);
 
-  // Real-time device status updates
-  const handleDeviceStatus = useCallback((event: unknown) => {
-    const e = event as DeviceStatusEvent;
-    setData((prev) => {
-      if (!prev) return prev;
-      const online = e.isOnline
-        ? prev.devices.online + 1
-        : Math.max(0, prev.devices.online - 1);
-      const offline = e.isOnline
-        ? Math.max(0, prev.devices.offline - 1)
-        : prev.devices.offline + 1;
-      return {
-        ...prev,
-        devices: { ...prev.devices, online, offline },
-      };
-    });
+  // Real-time device status updates. We track the last-seen state per serial
+  // so flapping status messages don't double-count online/offline transitions
+  // (each device should swing the counter at most once per state change).
+  const lastKnownStatusRef = useRef<Map<string, boolean>>(new Map());
+
+  const handleDeviceStatus = useCallback((e: DeviceStatusEvent) => {
+    const previous = lastKnownStatusRef.current.get(e.serialNumber);
+    const isStateChange = previous !== undefined && previous !== e.isOnline;
+    lastKnownStatusRef.current.set(e.serialNumber, e.isOnline);
+
+    if (isStateChange) {
+      setData((prev) => {
+        if (!prev) return prev;
+        const online = e.isOnline
+          ? prev.devices.online + 1
+          : Math.max(0, prev.devices.online - 1);
+        const offline = e.isOnline
+          ? Math.max(0, prev.devices.offline - 1)
+          : prev.devices.offline + 1;
+        return { ...prev, devices: { ...prev.devices, online, offline } };
+      });
+    }
 
     setLiveEvents((prev) => [
       { serialNumber: e.serialNumber, isOnline: e.isOnline, time: new Date().toISOString() },
@@ -64,8 +70,7 @@ export default function DashboardPage() {
   }, []);
 
   // Real-time service status updates
-  const handleServiceStatus = useCallback((event: unknown) => {
-    const e = event as { mqtt?: string; database?: string };
+  const handleServiceStatus = useCallback((e: { mqtt?: string; database?: string }) => {
     setData((prev) => {
       if (!prev) return prev;
       return {

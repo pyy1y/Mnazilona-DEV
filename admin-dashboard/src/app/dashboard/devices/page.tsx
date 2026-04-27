@@ -30,7 +30,7 @@ interface DeviceItem {
 interface DeviceStatusEvent {
   serialNumber: string;
   isOnline: boolean;
-  lastSeen: string;
+  lastSeen?: string;
 }
 
 const DEVICE_TYPES = ['relay', 'light', 'dimmer', 'ac', 'lock', 'water-tank', 'security'];
@@ -73,21 +73,33 @@ export default function DevicesPage() {
   useEffect(() => { fetchDevices(); }, [fetchDevices]);
 
   // Real-time: update device status in the list without refresh
-  const handleDeviceStatus = useCallback((event: unknown) => {
-    const e = event as DeviceStatusEvent;
+  const handleDeviceStatus = useCallback((event: DeviceStatusEvent) => {
     setDevices((prev) =>
       prev.map((d) =>
-        d.serialNumber === e.serialNumber
-          ? { ...d, isOnline: e.isOnline, lastSeen: e.lastSeen || d.lastSeen }
+        d.serialNumber === event.serialNumber
+          ? { ...d, isOnline: event.isOnline, lastSeen: event.lastSeen || d.lastSeen }
+          : d
+      )
+    );
+  }, []);
+
+  // Merge dp/report payloads into device.state so e.g. doorState reflects
+  // changes immediately in the table.
+  const handleDpReport = useCallback((event: { serialNumber: string; payload: Record<string, unknown> }) => {
+    setDevices((prev) =>
+      prev.map((d) =>
+        d.serialNumber === event.serialNumber
+          ? { ...d, state: { ...(d.state || {}), ...(event.payload || {}) } }
           : d
       )
     );
   }, []);
 
   useEffect(() => {
-    const off = on('device:status', handleDeviceStatus);
-    return off;
-  }, [on, handleDeviceStatus]);
+    const offStatus = on('device:status', handleDeviceStatus);
+    const offDp = on('device:dp_report', handleDpReport);
+    return () => { offStatus(); offDp(); };
+  }, [on, handleDeviceStatus, handleDpReport]);
 
   const handleConfirmAction = async () => {
     if (!confirmDialog) return;

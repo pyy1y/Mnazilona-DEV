@@ -4,6 +4,7 @@ import { createContext, useContext, useState, useEffect, useCallback, useRef, Re
 import { useRouter } from 'next/navigation';
 import Cookies from 'js-cookie';
 import { adminLoginSendCode, adminLoginVerifyCode, getDashboard } from './api';
+import { disconnectSocket } from './socket';
 
 interface Admin {
   id: string;
@@ -46,6 +47,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     Cookies.remove('admin_refresh_token');
     setToken(null);
     setAdmin(null);
+    // Tear down the singleton socket so the next login doesn't reuse a
+    // connection authenticated with the previous admin's token.
+    disconnectSocket();
   }, []);
 
   const logout = useCallback(() => {

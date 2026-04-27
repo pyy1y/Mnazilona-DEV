@@ -10,6 +10,7 @@ const Firmware = require('../models/Firmware');
 const { topicOf, publishMessage, MQTT_BROKER_HOST } = require('../config/mqtt');
 const { canUserAccessDevice, getDeviceACL } = require('../services/mqttAclService');
 const { trackDeviceCommand, trackPairAttempt } = require('../services/anomalyDetector');
+const { buildCommandHmac } = require('../utils/commandSigner');
 const {
   buildIdempotencyKey,
   getIdempotentResponse,
@@ -43,13 +44,6 @@ const sanitizeDeviceResponse = (device) => ({
   pairedAt: device.pairedAt,
   state: device.state,
 });
-
-function buildCommandHmac(mqttToken, command, ts) {
-  return crypto
-    .createHmac('sha256', mqttToken)
-    .update(`${command}${ts}`)
-    .digest('hex');
-}
 
 // ============================================================
 // inquiry - ESP32 device setup endpoint

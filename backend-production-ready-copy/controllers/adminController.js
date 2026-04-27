@@ -12,10 +12,12 @@ const Room = require('../models/Room');
 const { topicOf, publishMessage, isMqttHealthy } = require('../config/mqtt');
 const { isHealthy: isDbHealthy } = require('../config/database');
 const { generateToken, generateRefreshToken, REFRESH_TOKEN_EXPIRY_MS } = require('../utils/helpers');
+const { buildCommandHmac } = require('../utils/commandSigner');
 const { getStats: getRateLimitStats, getRecentEvents, getTopOffenders } = require('../config/rateLimitStore');
 const Firmware = require('../models/Firmware');
 const IPBlacklist = require('../models/IPBlacklist');
 const AnomalyAlert = require('../models/AnomalyAlert');
+const { emitToAdmins } = require('../config/socket');
 const { forceRefreshBlacklist } = require('../middleware/ipBlacklist');
 const { trackFailedLogin, trackAdminAction } = require('../services/anomalyDetector');
 const { sendVerificationCode, verifyCode } = require('../services/codeService');
@@ -564,18 +566,24 @@ exports.banDevice = async (req, res) => {
     device.banReason = reason || 'Banned by admin';
     await device.save();
 
-    // Unpair and set offline
-    await Device.findOneAndUpdate(
+    // Unpair and set offline. Read mqttToken in the same round-trip so we can
+    // sign the disconnect command (firmware requires HMAC for non-system cmds).
+    const pairedDevice = await Device.findOneAndUpdate(
       { serialNumber: device.serialNumber },
-      { owner: null, pairedAt: null, isOnline: false }
-    );
+      { owner: null, pairedAt: null, isOnline: false },
+      { new: false } // we only need the pre-update mqttToken
+    ).select('+mqttToken');
 
     // Send disconnect command via MQTT
     try {
+      const cmd = 'disconnect';
+      const ts = Date.now().toString();
       await publishMessage(topicOf(device.serialNumber, 'command'), {
-        command: 'disconnect',
+        command: cmd,
         reason: 'banned',
-        ts: Date.now(),
+        ts,
+        source: 'admin',
+        hmac: buildCommandHmac(pairedDevice?.mqttToken, cmd, ts),
       });
     } catch {}
 
@@ -692,16 +700,24 @@ exports.sendCommand = async (req, res) => {
     if (!command) return res.status(400).json({ message: 'Command is required' });
 
     const cleanSerial = serialNumber.trim().toUpperCase();
-    const device = await Device.findOne({ serialNumber: cleanSerial });
+    const device = await Device.findOne({ serialNumber: cleanSerial }).select('+mqttToken');
     if (!device) return res.status(404).json({ message: 'Device not found' });
 
     const topic = topicOf(cleanSerial, 'command');
+    const cleanCommand = command.trim().toLowerCase();
+    const ts = Date.now().toString();
+
+    // Devices verify HMAC-SHA256(mqttToken, command + ts) for any command
+    // where source != "system". Skipping this is what triggers the firmware's
+    // "MQTT command rejected: bad HMAC" log. The user-command path signs the
+    // same way; we share the helper.
     await publishMessage(topic, {
-      command: command.trim().toLowerCase(),
+      command: cleanCommand,
       params: params || {},
-      ts: Date.now(),
+      ts,
       source: 'admin',
       adminId: req.user.id,
+      hmac: buildCommandHmac(device.mqttToken, cleanCommand, ts),
     });
 
     await DeviceLog.create({
@@ -725,13 +741,17 @@ exports.unpairDevice = async (req, res) => {
     const { serialNumber } = req.params;
     const cleanSerial = serialNumber.trim().toUpperCase();
 
-    const device = await Device.findOne({ serialNumber: cleanSerial });
+    const device = await Device.findOne({ serialNumber: cleanSerial }).select('+mqttToken');
     if (!device) return res.status(404).json({ message: 'Device not found' });
     if (!device.owner) return res.status(400).json({ message: 'Device is not paired' });
 
     const previousOwner = device.owner;
+    const mqttToken = device.mqttToken;
     device.owner = null;
     device.pairedAt = null;
+    // Clear room link — otherwise the unpaired device keeps a stale reference
+    // to the previous owner's room, which surfaces in the admin device list.
+    device.room = null;
     await device.save();
 
     await AllowedDevice.findOneAndUpdate(
@@ -740,10 +760,13 @@ exports.unpairDevice = async (req, res) => {
     );
 
     try {
+      const cmd = 'unpaired';
+      const ts = Date.now().toString();
       await publishMessage(topicOf(cleanSerial, 'command'), {
-        command: 'unpaired',
+        command: cmd,
         source: 'admin',
-        ts: Date.now(),
+        ts,
+        hmac: buildCommandHmac(mqttToken, cmd, ts),
       });
     } catch {}
 
@@ -811,13 +834,16 @@ exports.factoryResetDevice = async (req, res) => {
     const { serialNumber } = req.params;
     const cleanSerial = serialNumber.trim().toUpperCase();
 
-    const device = await Device.findOne({ serialNumber: cleanSerial });
+    const device = await Device.findOne({ serialNumber: cleanSerial }).select('+mqttToken');
     if (!device) return res.status(404).json({ message: 'Device not found' });
 
+    const cmd = 'factory_reset';
+    const ts = Date.now().toString();
     await publishMessage(topicOf(cleanSerial, 'command'), {
-      command: 'factory_reset',
+      command: cmd,
       source: 'admin',
-      ts: Date.now(),
+      ts,
+      hmac: buildCommandHmac(device.mqttToken, cmd, ts),
     });
 
     // Unpair the device
@@ -1027,7 +1053,7 @@ exports.lockDevice = async (req, res) => {
     const { reason } = req.body;
     const cleanSerial = serialNumber.trim().toUpperCase();
 
-    const device = await Device.findOne({ serialNumber: cleanSerial });
+    const device = await Device.findOne({ serialNumber: cleanSerial }).select('+mqttToken');
     if (!device) return res.status(404).json({ message: 'Device not found' });
 
     device.adminLocked = true;
@@ -1038,12 +1064,15 @@ exports.lockDevice = async (req, res) => {
 
     // Notify device via MQTT
     try {
+      const cmd = 'admin_lock';
+      const ts = Date.now().toString();
       await publishMessage(topicOf(cleanSerial, 'command'), {
-        command: 'admin_lock',
+        command: cmd,
         locked: true,
         reason: device.adminLockReason,
-        ts: Date.now(),
+        ts,
         source: 'admin',
+        hmac: buildCommandHmac(device.mqttToken, cmd, ts),
       });
     } catch {}
 
@@ -1067,7 +1096,7 @@ exports.unlockDevice = async (req, res) => {
     const { serialNumber } = req.params;
     const cleanSerial = serialNumber.trim().toUpperCase();
 
-    const device = await Device.findOne({ serialNumber: cleanSerial });
+    const device = await Device.findOne({ serialNumber: cleanSerial }).select('+mqttToken');
     if (!device) return res.status(404).json({ message: 'Device not found' });
 
     device.adminLocked = false;
@@ -1077,11 +1106,14 @@ exports.unlockDevice = async (req, res) => {
     await device.save();
 
     try {
+      const cmd = 'admin_lock';
+      const ts = Date.now().toString();
       await publishMessage(topicOf(cleanSerial, 'command'), {
-        command: 'admin_lock',
+        command: cmd,
         locked: false,
-        ts: Date.now(),
+        ts,
         source: 'admin',
+        hmac: buildCommandHmac(device.mqttToken, cmd, ts),
       });
     } catch {}
 
@@ -1317,7 +1349,7 @@ exports.pushOtaUpdate = async (req, res) => {
       filter.serialNumber = serialNumber.trim().toUpperCase();
     }
 
-    const devices = await Device.find(filter).select('serialNumber isOnline firmwareVersion');
+    const devices = await Device.find(filter).select('serialNumber isOnline firmwareVersion +mqttToken');
 
     if (devices.length === 0) {
       return res.status(404).json({ message: 'No matching devices found' });
@@ -1338,16 +1370,21 @@ exports.pushOtaUpdate = async (req, res) => {
         continue;
       }
 
-      // Send OTA command via MQTT
+      // Send OTA command via MQTT (signed — firmware verifies HMAC for any
+      // non-system command). The OTA handler in firmware re-checks signature
+      // and downgrade on the URL+checksum it receives.
       const topic = topicOf(device.serialNumber, 'command');
+      const cmd = 'ota_update';
+      const ts = Date.now().toString();
       await publishMessage(topic, {
-        command: 'ota_update',
+        command: cmd,
         version: firmware.version,
         url: downloadUrl,
         checksum: firmware.checksum,
         fileSize: firmware.fileSize,
-        ts: Date.now(),
+        ts,
         source: 'admin',
+        hmac: buildCommandHmac(device.mqttToken, cmd, ts),
       });
 
       // Update device OTA tracking
@@ -1362,6 +1399,17 @@ exports.pushOtaUpdate = async (req, res) => {
           otaCompletedAt: null,
         }
       );
+
+      // Push the "notified" state to admin dashboards so the OTA panel
+      // updates immediately instead of waiting for the device's first
+      // ota/progress message (which can be several seconds out).
+      emitToAdmins('ota:progress', {
+        serialNumber: device.serialNumber,
+        status: 'notified',
+        progress: 0,
+        version: firmware.version,
+        error: null,
+      });
 
       await DeviceLog.create({
         serialNumber: device.serialNumber,
@@ -1446,12 +1494,14 @@ exports.getFirmwareStats = async (req, res) => {
       },
     });
 
-    // Count how many are actually outdated
+    // Count how many devices are actually outdated. The previous version had
+    // duplicate `$ne` keys in the same object — the second silently overrode
+    // the first, so the count was wrong. `$nin` accepts an array.
     let needsUpdateCount = 0;
     if (Object.keys(latestMap).length > 0) {
       const conditions = Object.entries(latestMap).map(([type, version]) => ({
         deviceType: type,
-        firmwareVersion: { $ne: version, $ne: null },
+        firmwareVersion: { $nin: [version, null, ''] },
         owner: { $ne: null },
       }));
       if (conditions.length > 0) {
