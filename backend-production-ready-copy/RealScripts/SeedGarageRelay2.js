@@ -10,7 +10,7 @@ const TEST_DEVICE = {
   serialNumber: 'SN-002',
   deviceSecret: 'b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4',  // نفس DEVICE_SECRET اللي بتحرقه على ESP32 الثاني
   deviceType: 'relay',
-  firmwareVersion: '1.1.0',
+  firmwareVersion: '1.0.0',
   hardwareVersion: '1.0',
   macAddress: '20:6E:F1:09:DD:8C',
   notes: 'Second garage relay device',

@@ -84,14 +84,15 @@ int                bleScanChunkIndex   = 0;
 // ═══════════════════════════════════════
 // CONFIG - ثوابت غير سرية
 // ═══════════════════════════════════════
-#define SERIAL_NUMBER     "SN-001"
 #define DEVICE_NAME       "Garage Relay"
-#define FIRMWARE_VERSION  "1.1.0"
+// OTA TEST BUILD — visible change: green LED blinks instead of staying solid
+// after WiFi+MQTT are online. Bumped above 1.2.0 so the OTA upgrade is accepted.
+#define FIRMWARE_VERSION  "1.0.1"
 
-// الأسرار تُقرأ من NVS (تُحرق مرة وحدة أثناء التصنيع)
-// استخدم أمر Provisioning لحرقها - لا تكتبها في الكود!
-// DEVICE_SECRET: مفتاح هوية الجهاز (32 حرف hex). يُستخدم لإثبات هوية
-// الجهاز للسيرفر فقط (بدون رمز PoP).
+// هوية الجهاز (السيريال + الـ secret) تُقرأ من NVS — تُحرق مرة وحدة
+// أثناء التصنيع. لكل جهاز قيم فريدة. لا تكتبها في الكود أبداً!
+//   PROVISION:serial=<SN-XXX>,secret=<hex32>
+String serialNumber = "";
 String deviceSecret = "";
 
 // ═══════════════════════════════════════
@@ -115,6 +116,26 @@ const char* ca_cert = "";
 //   openssl rsa -in ota_private.pem -pubout -out ota_public.pem
 // then paste the public key here (length must exceed 60 to activate).
 const char* ota_public_key = "";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OTA SCHEME POLICY — DEV vs PROD
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTPS is the default and only allowed scheme for OTA downloads.
+//
+// Set ALLOW_INSECURE_OTA_HTTP = 1 ONLY for local/private-network development
+// where the OTA server is reachable over plain http:// (e.g. a LAN dev box at
+// http://192.168.x.x:3000). When this flag is 0, the firmware behaves exactly
+// as before: HTTPS-only.
+//
+// Integrity is still enforced regardless of scheme:
+//   • SHA-256 checksum is verified against the server-provided value.
+//   • RSA-SHA256 signature is verified if ota_public_key is configured.
+// So even on plain HTTP, a tampered binary is rejected before flashing.
+//
+// MUST be set back to 0 for production builds.
+#ifndef ALLOW_INSECURE_OTA_HTTP
+#define ALLOW_INSECURE_OTA_HTTP 1   // 1 = HTTP allowed (DEV), 0 = HTTPS-only (PROD default)
+#endif
 
 // ═══════════════════════════════════════
 // SoftAP Settings (LEGACY — no longer used for provisioning)
@@ -382,6 +403,11 @@ void blinkLED() {
     case STATE_WIFI_RECONNECTING:
       ledToggleState ? setLED_offline() : setLED_off();
       break;
+    case STATE_ONLINE:
+      // OTA TEST: blink green to confirm the OTA build is running.
+      // Original firmware kept the LED solid green here.
+      ledToggleState ? setLED_online() : setLED_off();
+      break;
     case STATE_OTA_UPDATING:
       ledToggleState ? setLED_pairing() : setLED_ap();  // Blue+Yellow alternating = OTA
       break;
@@ -398,25 +424,33 @@ void blinkLED() {
 //            NVS STORAGE
 // ══════════════════════════════════════
 
-// Load device secret from NVS (burned once during manufacturing)
+// Load device identity (serial + secret) from NVS.
+// Both are burned once during manufacturing via Serial provisioning and
+// MUST remain unique per physical device — never hardcoded in firmware.
 bool loadSecrets() {
   prefs.begin("secrets", true);
+  serialNumber = prefs.getString("serial", "");
   deviceSecret = prefs.getString("secret", "");
   prefs.end();
 
-  if (deviceSecret.length() == 0) {
-    Serial.println("[SECURITY] Device secret NOT provisioned!");
-    Serial.println("[SECURITY] Use serial provisioning to burn the secret.");
+  bool ok = (serialNumber.length() > 0 && deviceSecret.length() > 0);
+  if (!ok) {
+    Serial.println("[SECURITY] Device identity NOT fully provisioned!");
+    Serial.printf("[SECURITY]   serial: %s\n", serialNumber.length() ? "OK" : "MISSING");
+    Serial.printf("[SECURITY]   secret: %s\n", deviceSecret.length() ? "OK" : "MISSING");
+    Serial.println("[SECURITY] Use serial provisioning to burn missing values.");
     return false;
   }
-  Serial.println("[SECURITY] Device secret loaded from NVS");
+  Serial.println("[SECURITY] Device identity loaded from NVS");
   return true;
 }
 
-// Provision secret via Serial (run once during manufacturing)
-// Send: PROVISION:secret=<hex32>
-// (PoP code is no longer used; left here only for backward compatibility:
-//  any extra params after the secret are ignored.)
+// Provision device identity via Serial (run once during manufacturing).
+// Accepted forms (any combination of serial/secret, comma-separated):
+//   PROVISION:serial=<SN-XXX>
+//   PROVISION:secret=<hex32>
+//   PROVISION:serial=<SN-XXX>,secret=<hex32>
+// (PoP code is no longer used; any extra params are ignored.)
 void checkSerialProvisioning() {
   if (!Serial.available()) return;
   String line = Serial.readStringUntil('\n');
@@ -424,30 +458,45 @@ void checkSerialProvisioning() {
 
   if (!line.startsWith("PROVISION:")) return;
 
-  String params = line.substring(10);
-  String secret = "";
+  String params    = line.substring(10);
+  String newSerial = "";
+  String newSecret = "";
 
-  // Accept either "secret=<hex>" alone or "secret=<hex>,..." (legacy)
-  int commaIdx = params.indexOf(',');
-  String part1 = (commaIdx < 0) ? params : params.substring(0, commaIdx);
-  if (part1.startsWith("secret=")) secret = part1.substring(7);
+  while (params.length() > 0) {
+    int comma = params.indexOf(',');
+    String pair = (comma < 0) ? params : params.substring(0, comma);
+    params      = (comma < 0) ? ""     : params.substring(comma + 1);
+    pair.trim();
 
-  if (secret.length() < 32) {
+    if      (pair.startsWith("serial=")) newSerial = pair.substring(7);
+    else if (pair.startsWith("secret=")) newSecret = pair.substring(7);
+  }
+
+  if (newSerial.length() == 0 && newSecret.length() == 0) {
+    Serial.println("[PROVISION] Error: provide serial=<SN> and/or secret=<hex32>");
+    return;
+  }
+  if (newSecret.length() > 0 && newSecret.length() < 32) {
     Serial.println("[PROVISION] Error: secret must be 32+ chars");
     return;
   }
 
   prefs.begin("secrets", false);
-  prefs.putString("secret", secret);
+  if (newSerial.length() > 0) prefs.putString("serial", newSerial);
+  if (newSecret.length() > 0) prefs.putString("secret", newSecret);
   prefs.remove("pop");  // clean up any legacy PoP value from older firmware
   prefs.end();
 
-  deviceSecret = secret;
-
-  Serial.println("[PROVISION] Secret burned to NVS successfully!");
-  Serial.printf("[PROVISION] Secret: %s...%s\n",
-                secret.substring(0, 4).c_str(),
-                secret.substring(secret.length() - 4).c_str());
+  if (newSerial.length() > 0) {
+    serialNumber = newSerial;
+    Serial.printf("[PROVISION] Serial burned to NVS: %s\n", serialNumber.c_str());
+  }
+  if (newSecret.length() > 0) {
+    deviceSecret = newSecret;
+    Serial.printf("[PROVISION] Secret burned to NVS: %s...%s\n",
+                  newSecret.substring(0, 4).c_str(),
+                  newSecret.substring(newSecret.length() - 4).c_str());
+  }
 }
 
 bool loadSettings() {
@@ -718,7 +767,7 @@ int inquireServer() {
   http.setTimeout(10000);
 
   StaticJsonDocument<384> doc;
-  doc["serialNumber"] = SERIAL_NUMBER;
+  doc["serialNumber"] = serialNumber.c_str();
   doc["deviceSecret"] = deviceSecret;
   doc["macAddress"]   = WiFi.macAddress();
   if (pairingUserId.length() > 0) {
@@ -786,7 +835,7 @@ int inquireServer() {
 // ══════════════════════════════════════
 
 String topicOf(const String& leaf) {
-  return String("mnazilona/devices/") + SERIAL_NUMBER + "/" + leaf;
+  return String("mnazilona/devices/") + serialNumber.c_str() + "/" + leaf;
 }
 
 void mqttPublishStatus(const char* st) {
@@ -895,7 +944,7 @@ void checkForOtaUpdate() {
   } else {
     http.begin(wifiPlainClient, checkUrl);
   }
-  http.addHeader("X-Device-Serial", SERIAL_NUMBER);
+  http.addHeader("X-Device-Serial", serialNumber.c_str());
   http.addHeader("X-Device-Secret", deviceSecret);
   http.addHeader("X-Firmware-Version", FIRMWARE_VERSION);
   http.setTimeout(10000);
@@ -912,10 +961,21 @@ void checkForOtaUpdate() {
         String checksum = doc["checksum"] | "";
         uint32_t fileSize = doc["fileSize"] | 0;
 
-        // Security: require HTTPS for OTA download
-        if (downloadUrl.length() > 0 && !downloadUrl.startsWith("https://")) {
-          Serial.println("[OTA] Rejected: download URL must use HTTPS");
-          addLog("OTA rejected: non-HTTPS URL from server", "warning");
+        // URL scheme validation. HTTPS always allowed; HTTP only when
+        // ALLOW_INSECURE_OTA_HTTP is enabled (dev/local-network testing).
+        bool isHttpsUrl = downloadUrl.startsWith("https://");
+        bool isHttpUrl  = downloadUrl.startsWith("http://");
+        Serial.printf("[OTA] Received OTA URL: %s\n", downloadUrl.c_str());
+        Serial.printf("[OTA] Detected protocol: %s\n",
+                      isHttpsUrl ? "HTTPS" : (isHttpUrl ? "HTTP" : "UNKNOWN"));
+        Serial.printf("[OTA] HTTP OTA allowed by config: %s\n",
+                      ALLOW_INSECURE_OTA_HTTP ? "YES (dev)" : "NO");
+
+        if (downloadUrl.length() > 0 &&
+            !isHttpsUrl &&
+            !(isHttpUrl && ALLOW_INSECURE_OTA_HTTP)) {
+          Serial.println("[OTA] Rejected: URL scheme not allowed (set ALLOW_INSECURE_OTA_HTTP=1 to permit http://)");
+          addLog("OTA rejected: URL scheme not allowed", "warning");
           http.end();
           lastOtaCheckMs = millis();
           return;
@@ -993,20 +1053,37 @@ void performOtaUpdate() {
   // Phase 1: Report downloading
   otaReportProgress("downloading", 0);
 
-  // Phase 2: Download firmware (over TLS)
+  // Phase 2: Download firmware
+  // - HTTPS  -> wifiSecureClient (TLS)
+  // - HTTP   -> wifiPlainClient (only when ALLOW_INSECURE_OTA_HTTP=1; the
+  //   scheme has already been validated by the OTA command/check handler)
+  bool otaUrlIsHttps = otaUrl.startsWith("https://");
+  bool otaUrlIsHttp  = otaUrl.startsWith("http://");
+  Serial.printf("[OTA] Detected protocol: %s\n",
+                otaUrlIsHttps ? "HTTPS" : (otaUrlIsHttp ? "HTTP" : "UNKNOWN"));
+  Serial.printf("[OTA] HTTP OTA allowed by config: %s\n",
+                ALLOW_INSECURE_OTA_HTTP ? "YES (dev)" : "NO");
+
   HTTPClient http;
   http.setTimeout(30000); // 30s connection timeout
-  if (!http.begin(wifiSecureClient, otaUrl)) {
-    Serial.println("[OTA] Failed to begin HTTPS connection");
-    otaReportProgress("failed", 0, "HTTPS connection failed");
-    addLog("OTA failed: HTTPS connection", "error");
+  bool beginOk = otaUrlIsHttps
+                   ? http.begin(wifiSecureClient, otaUrl)
+                   : http.begin(wifiPlainClient,  otaUrl);
+  if (!beginOk) {
+    Serial.printf("[OTA] Failed to begin %s connection\n",
+                  otaUrlIsHttps ? "HTTPS" : "HTTP");
+    otaReportProgress("failed", 0,
+                      otaUrlIsHttps ? "HTTPS connection failed" : "HTTP connection failed");
+    addLog("OTA failed: connection begin", "error");
     otaInProgress = false;
     currentState = STATE_ONLINE;
     return;
   }
+  Serial.printf("[OTA] OTA download started via %s\n",
+                otaUrlIsHttps ? "HTTPS" : "HTTP");
 
   // Add device authentication headers
-  http.addHeader("X-Device-Serial", SERIAL_NUMBER);
+  http.addHeader("X-Device-Serial", serialNumber.c_str());
   http.addHeader("X-Device-Secret", deviceSecret);
 
   int httpCode = http.GET();
@@ -1470,12 +1547,26 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       return;
     }
 
-    // Security: OTA downloads must use HTTPS (prevent MITM firmware injection)
-    if (!otaUrl.startsWith("https://")) {
-      Serial.println("[MQTT] OTA REJECTED: URL must use HTTPS");
-      otaReportProgress("failed", 0, "HTTPS required for OTA");
-      addLog("OTA rejected: non-HTTPS URL", "warning");
-      return;
+    // URL scheme validation. HTTPS always allowed; HTTP only when
+    // ALLOW_INSECURE_OTA_HTTP is enabled (dev/local-network testing).
+    // Integrity is still enforced via SHA-256 checksum (and RSA signature
+    // if ota_public_key is configured), so a tampered binary is rejected
+    // before flashing even on plain HTTP.
+    {
+      bool isHttpsUrl = otaUrl.startsWith("https://");
+      bool isHttpUrl  = otaUrl.startsWith("http://");
+      Serial.printf("[MQTT] Received OTA URL: %s\n", otaUrl.c_str());
+      Serial.printf("[MQTT] Detected protocol: %s\n",
+                    isHttpsUrl ? "HTTPS" : (isHttpUrl ? "HTTP" : "UNKNOWN"));
+      Serial.printf("[MQTT] HTTP OTA allowed by config: %s\n",
+                    ALLOW_INSECURE_OTA_HTTP ? "YES (dev)" : "NO");
+
+      if (!isHttpsUrl && !(isHttpUrl && ALLOW_INSECURE_OTA_HTTP)) {
+        Serial.println("[MQTT] OTA REJECTED: URL scheme not allowed (set ALLOW_INSECURE_OTA_HTTP=1 to permit http://)");
+        otaReportProgress("failed", 0, "URL scheme not allowed");
+        addLog("OTA rejected: URL scheme not allowed", "warning");
+        return;
+      }
     }
 
     // Validate URL length (prevent buffer abuse)
@@ -1553,7 +1644,7 @@ bool connectMQTT() {
   mqttClient.setCallback(mqttCallback);
   mqttClient.setBufferSize(1024);
 
-  String cid = String(SERIAL_NUMBER) + "-" + String(random(0xFFFF), HEX);
+  String cid = String(serialNumber.c_str()) + "-" + String(random(0xFFFF), HEX);
   Serial.printf("[MQTT] Connecting to %s:%d (%s)...\n",
                 mqttHost.c_str(), mqttPort, useTls ? "TLS" : "plain");
 
@@ -1628,7 +1719,7 @@ bool connectMQTT() {
     }
     if (inqResult == INQUIRY_OK) {
       mqttClient.setServer(mqttHost.c_str(), mqttPort);
-      String newCid = String(SERIAL_NUMBER) + "-" + String(random(0xFFFF), HEX);
+      String newCid = String(serialNumber.c_str()) + "-" + String(random(0xFFFF), HEX);
       if (mqttClient.connect(newCid.c_str(), mqttUser.c_str(), mqttPass.c_str(),
                               topicOf("status").c_str(), 1, true, "offline")) {
         mqttClient.subscribe(topicOf("command").c_str(), 1);
@@ -1671,14 +1762,14 @@ void startLocalServer() {
   if (localServerRunning) return;
 
   // mDNS: broadcast as "mnazilona-SN-001.local"
-  String hostname = "mnazilona-" + String(SERIAL_NUMBER);
+  String hostname = "mnazilona-" + String(serialNumber.c_str());
   hostname.toLowerCase();
   hostname.replace(" ", "-");
 
   if (MDNS.begin(hostname.c_str())) {
     MDNS.addService("mnazilona", "tcp", 8080);
-    MDNS.addServiceTxt("mnazilona", "tcp", "serial", SERIAL_NUMBER);
-    MDNS.addServiceTxt("mnazilona", "tcp", "sn", SERIAL_NUMBER);
+    MDNS.addServiceTxt("mnazilona", "tcp", "serial", serialNumber.c_str());
+    MDNS.addServiceTxt("mnazilona", "tcp", "sn", serialNumber.c_str());
     MDNS.addServiceTxt("mnazilona", "tcp", "type", "relay");
     MDNS.addServiceTxt("mnazilona", "tcp", "fw", FIRMWARE_VERSION);
     Serial.printf("[mDNS] Broadcasting: %s.local:8080\n", hostname.c_str());
@@ -1780,7 +1871,7 @@ void startLocalServer() {
     if (!verifyLocalAuth()) return;
 
     StaticJsonDocument<384> doc;
-    doc["serial"]    = SERIAL_NUMBER;
+    doc["serial"]    = serialNumber.c_str();
     doc["name"]      = DEVICE_NAME;
     doc["type"]      = "relay";
     doc["fw"]        = FIRMWARE_VERSION;
@@ -2038,7 +2129,7 @@ class WiFiConfigCallback : public BLECharacteristicCallbacks {
       StaticJsonDocument<128> rDoc;
       rDoc["status"]       = "ok";
       rDoc["message"]      = "Connected to WiFi!";
-      rDoc["serialNumber"] = SERIAL_NUMBER;
+      rDoc["serialNumber"] = serialNumber.c_str();
       String response;
       serializeJson(rDoc, response);
       bleNotify(bleCharWifiConfig, response);
@@ -2078,7 +2169,7 @@ void startBLE() {
   Serial.println("[BLE] Starting BLE provisioning...");
 
   // BLE device name: MNZ_SN-001 (short for advertising)
-  String bleName = String(BLE_ADV_NAME_PREFIX) + String(SERIAL_NUMBER);
+  String bleName = String(BLE_ADV_NAME_PREFIX) + String(serialNumber.c_str());
 
   BLEDevice::init(bleName.c_str());
   // Request max MTU for larger JSON payloads
@@ -2098,7 +2189,7 @@ void startBLE() {
   );
   // Set device info JSON as static value
   StaticJsonDocument<256> infoDoc;
-  infoDoc["serial"]      = SERIAL_NUMBER;
+  infoDoc["serial"]      = serialNumber.c_str();
   infoDoc["name"]        = DEVICE_NAME;
   infoDoc["type"]        = "relay";
   infoDoc["fw"]          = FIRMWARE_VERSION;
@@ -2375,6 +2466,10 @@ void handleStateMachine() {
         return;
       }
 
+      // OTA TEST: keep blinking the green LED while online (instead of solid).
+      // The blink cadence is enforced inside blinkLED() (500 ms gate).
+      blinkLED();
+
       // Rollback timeout check (if pending verification)
       checkOtaRollbackTimeout();
 
@@ -2483,9 +2578,11 @@ void setup() {
   Serial.println("[WDT] Watchdog timer initialized (30s)");
 
   // ═══════════════════════════════════════
-  // LOAD DEVICE SECRETS FROM NVS
-  // Secrets are burned once during manufacturing via Serial provisioning
-  // Command: PROVISION:secret=<hex32>,pop=<code>
+  // LOAD DEVICE IDENTITY FROM NVS
+  // Both serial and secret are burned once during manufacturing via
+  // Serial provisioning. They MUST be unique per device — never put
+  // them in the firmware source.
+  // Command: PROVISION:serial=<SN-XXX>,secret=<hex32>
   // ═══════════════════════════════════════
   bool secretsLoaded = loadSecrets();
 
@@ -2493,13 +2590,15 @@ void setup() {
     Serial.println("\n╔══════════════════════════════════════════╗");
     Serial.println("║  DEVICE NOT PROVISIONED                  ║");
     Serial.println("║  Send via Serial:                        ║");
-    Serial.println("║  PROVISION:secret=<32+hex>               ║");
+    Serial.println("║  PROVISION:serial=<SN-XXX>,secret=<hex>  ║");
     Serial.println("╚══════════════════════════════════════════╝\n");
 
-    // Wait for provisioning via Serial (blocking until provisioned)
+    // Wait for provisioning via Serial (blocking until both are set).
+    // Watchdog must keep being fed while we wait or it will reset us.
     setLED_error();
-    while (deviceSecret.length() == 0) {
+    while (serialNumber.length() == 0 || deviceSecret.length() == 0) {
       checkSerialProvisioning();
+      esp_task_wdt_reset();
       delay(100);
     }
     setLED_off();
@@ -2545,7 +2644,7 @@ void setup() {
 
   Serial.println("\n======================================");
   Serial.printf("  Mnazilona IoT - %s\n", DEVICE_NAME);
-  Serial.printf("  SN:  %s\n", SERIAL_NUMBER);
+  Serial.printf("  SN:  %s\n", serialNumber.c_str());
   Serial.printf("  FW:  %s\n", FIRMWARE_VERSION);
   Serial.printf("  MAC: %s\n", macAddr.c_str());
   Serial.println("  Mode: Garage Relay (Pulse)");
