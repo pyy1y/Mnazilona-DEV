@@ -95,6 +95,8 @@ router.delete('/firmware/:firmwareId', adminController.deleteFirmware);
 // OTA Management
 router.post('/firmware/:firmwareId/push', apiLimiter, adminController.pushOtaUpdate);
 router.get('/ota/status', adminController.getOtaStatus);
+router.post('/ota/clear/:serialNumber', adminController.clearOtaStatus);
+router.post('/ota/clear-all', adminController.clearAllOtaStatus);
 
 // IP Blacklist Management
 router.get('/blacklist', adminController.listBlacklist);

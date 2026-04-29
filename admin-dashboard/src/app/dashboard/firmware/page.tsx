@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { listFirmware, createFirmware, updateFirmware, deleteFirmware, getFirmwareStats, pushOtaUpdate, getOtaStatus } from '@/lib/api';
+import { listFirmware, createFirmware, updateFirmware, deleteFirmware, getFirmwareStats, pushOtaUpdate, getOtaStatus, clearOtaStatus, clearAllOtaStatus } from '@/lib/api';
 import { useToast } from '@/components/Toast';
 import { getErrorMessage } from '@/lib/types';
 import ConfirmDialog from '@/components/ConfirmDialog';
@@ -126,6 +126,30 @@ export default function FirmwarePage() {
       setOtaDevices(res.data.devices);
     } catch { /* non-critical */ }
   }, []);
+
+  const handleClearOta = useCallback(async (serialNumber: string) => {
+    try {
+      await clearOtaStatus(serialNumber);
+      // Optimistic remove so the row disappears immediately even before the
+      // ota:progress event round-trips through the websocket.
+      setOtaDevices((prev) => prev.filter((d) => d.serialNumber !== serialNumber));
+      toast.success(`Cleared OTA state for ${serialNumber}`);
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to clear OTA status'));
+      fetchOtaStatus();
+    }
+  }, [toast, fetchOtaStatus]);
+
+  const handleClearAllOta = useCallback(async () => {
+    try {
+      const res = await clearAllOtaStatus();
+      setOtaDevices([]);
+      toast.success(`Cleared ${res.data.cleared} stuck OTA state(s)`);
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to clear OTA states'));
+      fetchOtaStatus();
+    }
+  }, [toast, fetchOtaStatus]);
 
   useEffect(() => { fetchFirmwares(); fetchStats(); fetchOtaStatus(); }, [fetchFirmwares, fetchStats, fetchOtaStatus]);
 
@@ -257,7 +281,15 @@ export default function FirmwarePage() {
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
           <div className="px-6 py-4 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
             <h2 className="text-lg font-semibold">OTA Update Progress</h2>
-            <button onClick={fetchOtaStatus} className="text-sm text-blue-600 hover:underline">Refresh</button>
+            <div className="flex items-center gap-4">
+              <button
+                onClick={handleClearAllOta}
+                className="text-sm text-red-600 hover:underline"
+              >
+                Clear All
+              </button>
+              <button onClick={fetchOtaStatus} className="text-sm text-blue-600 hover:underline">Refresh</button>
+            </div>
           </div>
           <table className="w-full">
             <thead>
@@ -268,6 +300,7 @@ export default function FirmwarePage() {
                 <th className="px-6 py-2 text-left text-xs font-semibold text-gray-500">Status</th>
                 <th className="px-6 py-2 text-left text-xs font-semibold text-gray-500">Progress</th>
                 <th className="px-6 py-2 text-left text-xs font-semibold text-gray-500">Error</th>
+                <th className="px-6 py-2 text-right text-xs font-semibold text-gray-500"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -297,6 +330,15 @@ export default function FirmwarePage() {
                     )}
                   </td>
                   <td className="px-6 py-3 text-xs text-red-500 max-w-xs truncate">{d.otaError || '-'}</td>
+                  <td className="px-6 py-3 text-right">
+                    <button
+                      onClick={() => handleClearOta(d.serialNumber)}
+                      className="text-xs text-gray-500 hover:text-red-600 hover:underline"
+                      title="Reset this device's OTA state to idle"
+                    >
+                      Clear
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>

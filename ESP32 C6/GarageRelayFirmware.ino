@@ -85,7 +85,7 @@ int                bleScanChunkIndex   = 0;
 // CONFIG - ثوابت غير سرية
 // ═══════════════════════════════════════
 #define DEVICE_NAME       "Garage Relay"
-#define FIRMWARE_VERSION  "1.0.0"
+#define FIRMWARE_VERSION  "1.0.2"
 
 // هوية الجهاز (السيريال + الـ secret) تُقرأ من NVS — تُحرق مرة وحدة
 // أثناء التصنيع. لكل جهاز قيم فريدة. لا تكتبها في الكود أبداً!
@@ -265,6 +265,10 @@ DeviceState currentState   = STATE_BOOT;
 // TLS-secured clients
 WiFiClientSecure wifiSecureClient;
 WiFiClient       wifiPlainClient;   // for plain HTTP (dev/local server)
+// Dedicated client for OTA download. MUST NOT be shared with MQTT —
+// PubSubClient and HTTPClient operating on the same WiFiClient instance
+// corrupts the underlying TCP socket and aborts the download mid-stream.
+WiFiClient       otaPlainClient;
 PubSubClient mqttClient(wifiSecureClient);
 WebServer server(80);
 WebServer localServer(8080);  // Local API server (runs when online)
@@ -1057,11 +1061,21 @@ void performOtaUpdate() {
   Serial.printf("[OTA] HTTP OTA allowed by config: %s\n",
                 ALLOW_INSECURE_OTA_HTTP ? "YES (dev)" : "NO");
 
+  // Quiesce MQTT for the duration of the download. PubSubClient and
+  // HTTPClient must not be active on the same WiFiClient at the same
+  // time, and MQTT keepalive activity during a multi-second download
+  // tears the OTA TCP stream. We reconnect MQTT after the update path
+  // completes (or naturally on reboot if the update succeeds).
+  if (mqttClient.connected()) {
+    Serial.println("[OTA] Disconnecting MQTT before download");
+    mqttClient.disconnect();
+  }
+
   HTTPClient http;
   http.setTimeout(30000); // 30s connection timeout
   bool beginOk = otaUrlIsHttps
                    ? http.begin(wifiSecureClient, otaUrl)
-                   : http.begin(wifiPlainClient,  otaUrl);
+                   : http.begin(otaPlainClient,   otaUrl);
   if (!beginOk) {
     Serial.printf("[OTA] Failed to begin %s connection\n",
                   otaUrlIsHttps ? "HTTPS" : "HTTP");
@@ -1184,16 +1198,24 @@ void performOtaUpdate() {
     totalRead += readBytes;
     int percent = (totalRead * 100) / contentLength;
 
-    // Report progress every 10%
+    // Report progress every 10% — Serial only. MQTT is intentionally
+    // disconnected for the duration of the download (see top of
+    // performOtaUpdate); otaReportProgress would be a no-op anyway, and
+    // any MQTT activity here would corrupt the HTTP TCP stream.
     if (percent / 10 != lastReportedPercent / 10) {
       lastReportedPercent = percent;
       Serial.printf("[OTA] Progress: %d%% (%d/%d bytes)\n", percent, totalRead, contentLength);
-      otaReportProgress("downloading", percent);
-      mqttClient.loop();
     }
 
-    // Keep system alive
-    yield();
+    // Feed the task watchdog and yield to IDLE.
+    // yield() alone is insufficient: it only reschedules equal/higher
+    // priority tasks, and the IDLE task (which feeds the WDT for
+    // loopTask) never gets to run during a tight download loop. Update.write()
+    // also performs synchronous flash sector erases that can exceed the
+    // default 5s WDT window. delay(1) blocks loopTask for one tick so
+    // IDLE runs; esp_task_wdt_reset() is belt-and-suspenders.
+    esp_task_wdt_reset();
+    delay(1);
   }
 
   http.end();

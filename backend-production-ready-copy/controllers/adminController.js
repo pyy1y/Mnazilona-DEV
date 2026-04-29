@@ -1438,6 +1438,66 @@ exports.pushOtaUpdate = async (req, res) => {
 };
 
 // ============================================================
+// clearOtaStatus - Reset a single device's OTA tracking back to idle
+// (used by admin dashboard to dismiss stuck rows from the OTA panel)
+// ============================================================
+const OTA_CLEAR_FIELDS = {
+  otaStatus: 'idle',
+  otaTargetVersion: null,
+  otaProgress: 0,
+  otaError: null,
+  otaStartedAt: null,
+  otaCompletedAt: null,
+};
+
+exports.clearOtaStatus = async (req, res) => {
+  try {
+    const serialNumber = (req.params.serialNumber || '').trim().toUpperCase();
+    if (!serialNumber) return res.status(400).json({ message: 'serialNumber required' });
+
+    const result = await Device.findOneAndUpdate(
+      { serialNumber },
+      { $set: OTA_CLEAR_FIELDS },
+      { new: true }
+    );
+    if (!result) return res.status(404).json({ message: 'Device not found' });
+
+    emitToAdmins('ota:progress', {
+      serialNumber,
+      status: 'idle',
+      progress: 0,
+      version: null,
+      error: null,
+    });
+
+    res.json({ message: 'OTA status cleared', serialNumber });
+  } catch (error) {
+    console.error('Clear OTA status error:', error.message);
+    res.status(500).json({ message: 'Failed to clear OTA status' });
+  }
+};
+
+// ============================================================
+// clearAllOtaStatus - Reset every non-idle device. Use to wipe
+// the OTA panel when many devices are stuck.
+// ============================================================
+exports.clearAllOtaStatus = async (req, res) => {
+  try {
+    const result = await Device.updateMany(
+      { otaStatus: { $ne: 'idle' } },
+      { $set: OTA_CLEAR_FIELDS }
+    );
+
+    emitToAdmins('ota:progress', { cleared: 'all' });
+
+    res.json({ message: 'All stuck OTA states cleared', cleared: result.modifiedCount });
+  } catch (error) {
+    console.error('Clear all OTA status error:', error.message);
+    res.status(500).json({ message: 'Failed to clear OTA states' });
+  }
+};
+
+// ============================================================
 // getOtaStatus - Get OTA status for all devices or specific device
 // ============================================================
 exports.getOtaStatus = async (req, res) => {

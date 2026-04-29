@@ -169,6 +169,9 @@ export const pushOtaUpdate = (firmwareId: string, serialNumber?: string) =>
   api.post(`/firmware/${firmwareId}/push`, serialNumber ? { serialNumber } : {});
 export const getOtaStatus = (params?: Record<string, string | number>) =>
   api.get('/ota/status', { params });
+export const clearOtaStatus = (serialNumber: string) =>
+  api.post(`/ota/clear/${encodeURIComponent(serialNumber)}`);
+export const clearAllOtaStatus = () => api.post('/ota/clear-all');
 
 // IP Blacklist
 export const getBlacklist = (params?: Record<string, string | number>) =>
