@@ -1,7 +1,12 @@
 const mqtt = require('mqtt');
 const Device = require('../models/Device');
 const DeviceLog = require('../models/DeviceLog');
-const { emitToAdmins } = require('./socket');
+const {
+  emitToAdminLobby,
+  emitToAdminDevicesView,
+  emitToDeviceWatchers,
+  emitToUser,
+} = require('./socket');
 const logger = require('../utils/logger');
 
 const fs = require('fs');
@@ -67,35 +72,57 @@ const safeJsonParse = (str) => {
 const recentLogs = new Map();
 const DEDUP_WINDOW_MS = 10000;
 
-// Device existence cache - avoids DB query on every MQTT message
-const deviceExistsCache = new Map();
+// Per-device cache of the last dp/report payload we emitted. Devices commonly
+// publish unchanged state on a timer; this skips the socket fan-out (and the
+// owner's mobile push) when nothing actually changed. We still write the DB
+// (lastSeen needs to advance) — only the socket emit is suppressed.
+const lastEmittedDpPayload = new Map();
+
+// Device meta cache (existence + owner + name) - avoids DB query on every MQTT message
+const deviceMetaCache = new Map();
 const DEVICE_CACHE_TTL_MS = 60000; // 1 minute
 
-const isDeviceKnown = async (serialNumber) => {
+const getDeviceMeta = async (serialNumber) => {
   const sn = serialNumber.toUpperCase();
-  const cached = deviceExistsCache.get(sn);
   const now = Date.now();
+  const cached = deviceMetaCache.get(sn);
 
   if (cached && now - cached.time < DEVICE_CACHE_TTL_MS) {
-    return cached.exists;
+    return cached.meta;
   }
 
-  const exists = !!(await Device.exists({ serialNumber: sn }));
-  deviceExistsCache.set(sn, { exists, time: now });
+  const device = await Device.findOne({ serialNumber: sn })
+    .select('owner name deviceType')
+    .lean();
+  const meta = device
+    ? { exists: true, ownerId: device.owner ? device.owner.toString() : null, name: device.name, deviceType: device.deviceType }
+    : { exists: false, ownerId: null, name: null, deviceType: null };
+
+  deviceMetaCache.set(sn, { meta, time: now });
 
   // Cleanup old entries periodically
-  if (deviceExistsCache.size > 1000) {
-    for (const [key, val] of deviceExistsCache) {
-      if (now - val.time > DEVICE_CACHE_TTL_MS) deviceExistsCache.delete(key);
+  if (deviceMetaCache.size > 1000) {
+    for (const [key, val] of deviceMetaCache) {
+      if (now - val.time > DEVICE_CACHE_TTL_MS) deviceMetaCache.delete(key);
     }
   }
 
-  return exists;
+  return meta;
+};
+
+// Backwards-compatible existence check
+const isDeviceKnown = async (serialNumber) => (await getDeviceMeta(serialNumber)).exists;
+
+// Public: invalidate the cache when ownership changes (called by deviceController on pair/unpair)
+const invalidateDeviceMeta = (serialNumber) => {
+  if (!serialNumber) return;
+  deviceMetaCache.delete(serialNumber.toUpperCase());
 };
 
 const logDevice = async (serialNumber, type, message, source = 'device') => {
   try {
-    const key = `${serialNumber.toUpperCase()}:${message}`;
+    const sn = serialNumber.toUpperCase();
+    const key = `${sn}:${message}`;
     const now = Date.now();
     const lastTime = recentLogs.get(key);
     if (lastTime && now - lastTime < DEDUP_WINDOW_MS) return;
@@ -107,37 +134,64 @@ const logDevice = async (serialNumber, type, message, source = 'device') => {
       }
     }
 
-    await DeviceLog.create({ serialNumber: serialNumber.toUpperCase(), type, message, source });
+    const log = await DeviceLog.create({ serialNumber: sn, type, message, source });
+
+    // Push the new log entry to the device owner in real time
+    const meta = await getDeviceMeta(sn);
+    if (meta.ownerId) {
+      emitToUser(meta.ownerId, 'device:log', {
+        serialNumber: sn,
+        deviceName: meta.name || sn,
+        type: log.type,
+        message: log.message,
+        source: log.source,
+        timestamp: log.createdAt,
+      });
+    }
   } catch (err) {
     logger.error('DeviceLog failed', { error: err.message });
   }
 };
 
 const handleStatusMessage = async (serialNumber, message) => {
+  const sn = serialNumber.toUpperCase();
   const isOnline = message === 'online';
   const updateData = { isOnline };
   if (isOnline) updateData.lastSeen = new Date();
-  const device = await Device.findOneAndUpdate({ serialNumber }, updateData, { new: true })
+
+  const device = await Device.findOneAndUpdate({ serialNumber: sn }, updateData, { new: true })
     .populate('owner', 'name email')
     .lean();
+  if (!device) return;
 
-  await logDevice(serialNumber, 'info',
+  await logDevice(sn, 'info',
     isOnline ? 'Device came online' : 'Device went offline',
     'mqtt'
   );
 
-  // Broadcast to admin dashboards
-  emitToAdmins('device:status', {
-    serialNumber: serialNumber.toUpperCase(),
-    isOnline,
-    lastSeen: device?.lastSeen,
-    deviceType: device?.deviceType,
-    name: device?.name,
-    owner: device?.owner,
-  });
+  const updatePayload = {
+    serialNumber: sn,
+    isOnline: device.isOnline,
+    lastSeen: device.lastSeen,
+    deviceType: device.deviceType,
+    name: device.name,
+    state: device.state,
+  };
+
+  // Status (online/offline) is relevant on the devices index AND on the
+  // per-device detail page. Both rooms get it; admins on other pages don't.
+  const adminPayload = { ...updatePayload, owner: device.owner };
+  emitToAdminDevicesView('device:status', adminPayload);
+  emitToDeviceWatchers(sn, 'device:status', adminPayload);
+
+  // Push to the owner's mobile app sockets
+  if (device.owner?._id) {
+    emitToUser(device.owner._id, 'device:update', updatePayload);
+  }
 };
 
 const handleHeartbeatMessage = async (serialNumber, message) => {
+  const sn = serialNumber.toUpperCase();
   const payload = safeJsonParse(message);
   const update = { isOnline: true, lastSeen: new Date() };
 
@@ -145,42 +199,85 @@ const handleHeartbeatMessage = async (serialNumber, message) => {
     update['state.doorState'] = payload.doorState;
   }
 
-  await Device.findOneAndUpdate({ serialNumber }, update);
+  const device = await Device.findOneAndUpdate({ serialNumber: sn }, update, { new: true })
+    .select('owner name deviceType isOnline lastSeen state')
+    .lean();
+  if (!device) return;
 
-  // Broadcast heartbeat to admin dashboards
-  emitToAdmins('device:heartbeat', {
-    serialNumber: serialNumber.toUpperCase(),
+  // Heartbeat is high-frequency and only useful when an admin is actively
+  // looking at this device. Scope it to the per-device room.
+  emitToDeviceWatchers(sn, 'device:heartbeat', {
+    serialNumber: sn,
     isOnline: true,
-    lastSeen: new Date(),
+    lastSeen: device.lastSeen,
     payload,
   });
+
+  if (device.owner) {
+    emitToUser(device.owner, 'device:update', {
+      serialNumber: sn,
+      isOnline: true,
+      lastSeen: device.lastSeen,
+      state: device.state,
+    });
+  }
 };
 
 const handleDpReportMessage = async (serialNumber, message) => {
+  const sn = serialNumber.toUpperCase();
   const payload = safeJsonParse(message);
   if (!payload) {
-    logger.warn('Invalid JSON on dp/report', { serialNumber });
+    logger.warn('Invalid JSON on dp/report', { serialNumber: sn });
     return;
   }
-  await Device.findOneAndUpdate({ serialNumber }, { isOnline: true, lastSeen: new Date() });
+
+  // Build a single update with everything the report carries
+  const update = { isOnline: true, lastSeen: new Date() };
+  if (payload.doorState === 'open' || payload.doorState === 'closed') {
+    update['state.doorState'] = payload.doorState;
+  }
+  if (typeof payload.relay === 'string') {
+    update['state.relay'] = payload.relay;
+  }
+
+  const device = await Device.findOneAndUpdate({ serialNumber: sn }, update, { new: true })
+    .select('owner name deviceType isOnline lastSeen state')
+    .lean();
+  if (!device) return;
 
   if (payload.relay === 'opened') {
-    await logDevice(serialNumber, 'info', 'Relay activated - door opened', 'device');
+    await logDevice(sn, 'info', 'Relay activated - door opened', 'device');
   }
-
   if (payload.doorState === 'open' || payload.doorState === 'closed') {
-    await Device.findOneAndUpdate(
-      { serialNumber },
-      { 'state.doorState': payload.doorState }
-    );
-    await logDevice(serialNumber, 'info', `Door sensor: ${payload.doorState}`, 'device');
+    await logDevice(sn, 'info', `Door sensor: ${payload.doorState}`, 'device');
   }
 
-  // Broadcast dp report to admin dashboards
-  emitToAdmins('device:dp_report', {
-    serialNumber: serialNumber.toUpperCase(),
-    payload,
-  });
+  // Skip the socket fan-out if the payload is byte-identical to the last
+  // one we emitted for this device. The DB still advanced lastSeen above.
+  const payloadKey = JSON.stringify(payload);
+  if (lastEmittedDpPayload.get(sn) === payloadKey) return;
+  lastEmittedDpPayload.set(sn, payloadKey);
+  if (lastEmittedDpPayload.size > 1000) {
+    // Bounded — drop the oldest half. Map iteration is insertion-ordered.
+    const toDrop = lastEmittedDpPayload.size - 500;
+    let i = 0;
+    for (const k of lastEmittedDpPayload.keys()) {
+      if (i++ >= toDrop) break;
+      lastEmittedDpPayload.delete(k);
+    }
+  }
+
+  // Telemetry — same reasoning as heartbeat: per-device room only.
+  emitToDeviceWatchers(sn, 'device:dp_report', { serialNumber: sn, payload });
+
+  if (device.owner) {
+    emitToUser(device.owner, 'device:update', {
+      serialNumber: sn,
+      isOnline: true,
+      lastSeen: device.lastSeen,
+      state: device.state,
+    });
+  }
 };
 
 const handleOtaProgressMessage = async (serialNumber, message) => {
@@ -214,13 +311,19 @@ const handleOtaProgressMessage = async (serialNumber, message) => {
     'device'
   );
 
-  emitToAdmins('ota:progress', {
-    serialNumber: serialNumber.toUpperCase(),
-    status,
-    progress,
-    version,
-    error,
-  });
+  const sn = serialNumber.toUpperCase();
+  const progressPayload = { serialNumber: sn, status, progress, version, error };
+
+  // Fine-grained progress: per-device room only (high frequency).
+  emitToDeviceWatchers(serialNumber, 'ota:progress', progressPayload);
+
+  // Lifecycle (terminal status only): broadcast to lobby so the firmware
+  // fleet view refreshes when an OTA completes/fails. The "started"
+  // lifecycle event is emitted by the OTA controller at push time, so
+  // we don't need to emit on intermediate states like "downloading".
+  if (status === 'success' || status === 'failed' || status === 'rolled_back') {
+    emitToAdminLobby('ota:lifecycle', progressPayload);
+  }
 };
 
 const handleMessage = async (topic, messageBuf) => {
@@ -271,10 +374,10 @@ const setupMQTT = () => {
   });
 
   mqttClient.on('message', handleMessage);
-  mqttClient.on('error', (err) => { logger.error('MQTT error', { error: err.message }); isConnected = false; emitToAdmins('service:status', { mqtt: 'disconnected' }); });
+  mqttClient.on('error', (err) => { logger.error('MQTT error', { error: err.message }); isConnected = false; emitToAdminLobby('service:status', { mqtt: 'disconnected' }); });
   mqttClient.on('reconnect', () => logger.info('MQTT reconnecting...'));
-  mqttClient.on('close', () => { isConnected = false; emitToAdmins('service:status', { mqtt: 'disconnected' }); });
-  mqttClient.on('offline', () => { isConnected = false; emitToAdmins('service:status', { mqtt: 'disconnected' }); });
+  mqttClient.on('close', () => { isConnected = false; emitToAdminLobby('service:status', { mqtt: 'disconnected' }); });
+  mqttClient.on('offline', () => { isConnected = false; emitToAdminLobby('service:status', { mqtt: 'disconnected' }); });
 
   return mqttClient;
 };
@@ -312,6 +415,7 @@ module.exports = {
   topicOf,
   publishMessage,
   isMqttHealthy,
+  invalidateDeviceMeta,
   MQTT_BROKER_HOST,
   MQTT_BROKER_URL,
 };

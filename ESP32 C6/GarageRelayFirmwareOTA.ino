@@ -87,7 +87,7 @@ int                bleScanChunkIndex   = 0;
 #define DEVICE_NAME       "Garage Relay"
 // OTA TEST BUILD — visible change: green LED blinks instead of staying solid
 // after WiFi+MQTT are online. Bumped above 1.2.0 so the OTA upgrade is accepted.
-#define FIRMWARE_VERSION  "1.0.1"
+#define FIRMWARE_VERSION  "1.0.3"
 
 // هوية الجهاز (السيريال + الـ secret) تُقرأ من NVS — تُحرق مرة وحدة
 // أثناء التصنيع. لكل جهاز قيم فريدة. لا تكتبها في الكود أبداً!

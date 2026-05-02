@@ -1,6 +1,6 @@
 const AnomalyAlert = require('../models/AnomalyAlert');
 const IPBlacklist = require('../models/IPBlacklist');
-const { emitToAdmins } = require('../config/socket');
+const { emitToAdminLobby, emitToAdminMonitoring } = require('../config/socket');
 const { forceRefreshBlacklist } = require('../middleware/ipBlacklist');
 
 const ANOMALY_DISABLED = process.env.DISABLE_ANOMALY_DETECTOR === 'true';
@@ -84,8 +84,10 @@ const createAlert = async (type, severity, ip, target, description, details = {}
       autoBlocked,
     });
 
-    // Notify admins in real-time
-    emitToAdmins('anomaly:alert', {
+    // Anomalies go to two places: the lobby (every admin gets the badge /
+    // toast) and the monitoring view (live feed). Same payload — the
+    // dashboard just dedupes by alert.id when both rooms deliver it.
+    const payload = {
       id: alert._id,
       type: alert.type,
       severity: alert.severity,
@@ -94,7 +96,9 @@ const createAlert = async (type, severity, ip, target, description, details = {}
       description: alert.description,
       autoBlocked: alert.autoBlocked,
       createdAt: alert.createdAt,
-    });
+    };
+    emitToAdminLobby('anomaly:alert', payload);
+    emitToAdminMonitoring('anomaly:alert', payload);
 
     return alert;
   } catch (err) {

@@ -7,7 +7,7 @@ import { useToast } from '@/components/Toast';
 import { getErrorMessage } from '@/lib/types';
 import { useDebounce } from '@/lib/hooks';
 import ConfirmDialog from '@/components/ConfirmDialog';
-import { useSocket } from '@/lib/socket';
+import { useSocket, useAdminSubscription } from '@/lib/socket';
 import DataTable from '@/components/DataTable';
 import StatusBadge from '@/components/StatusBadge';
 import { Search, Unplug, Terminal, RotateCcw, Zap } from 'lucide-react';
@@ -48,6 +48,7 @@ export default function DevicesPage() {
   const [commandModal, setCommandModal] = useState<{ serial: string; name: string } | null>(null);
   const [command, setCommand] = useState('');
   const { connected, on } = useSocket();
+  useAdminSubscription({ topic: 'devices' });
 
   // Confirm dialog state
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -98,8 +99,16 @@ export default function DevicesPage() {
   useEffect(() => {
     const offStatus = on('device:status', handleDeviceStatus);
     const offDp = on('device:dp_report', handleDpReport);
-    return () => { offStatus(); offDp(); };
-  }, [on, handleDeviceStatus, handleDpReport]);
+    // Lifecycle events: refetch the current page so the table reflects new
+    // rows / removed rows / ownership changes without local merge logic.
+    const refresh = () => { fetchDevices(pagination.page); };
+    const offPaired = on('device:paired', refresh);
+    const offUnpaired = on('device:unpaired', refresh);
+    const offTransferred = on('device:transferred', refresh);
+    return () => {
+      offStatus(); offDp(); offPaired(); offUnpaired(); offTransferred();
+    };
+  }, [on, handleDeviceStatus, handleDpReport, fetchDevices, pagination.page]);
 
   const handleConfirmAction = async () => {
     if (!confirmDialog) return;

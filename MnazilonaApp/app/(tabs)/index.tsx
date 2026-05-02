@@ -28,7 +28,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { api, isAuthError } from '../../utils/api';
 import { useAuth } from '../../hooks/useAuth';
-import { ENDPOINTS, APP_CONFIG } from '../../constants/api';
+import { ENDPOINTS } from '../../constants/api';
 import DeviceListItem from '../../components/DeviceListItem';
 import { DeviceCache } from '../../utils/deviceCache';
 import {
@@ -38,6 +38,7 @@ import {
   onLocalStatusUpdate,
 } from '../../utils/localDiscovery';
 import { smartSendCommand, smartFetchLogs } from '../../utils/connectionManager';
+import { connectSocket, onSocketEvent } from '../../utils/socket';
 
 const BRAND_COLOR = '#2E5B8E';
 
@@ -104,7 +105,6 @@ const [weatherError, setWeatherError] = useState<string | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const isLoadingRef = useRef(false);
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ==========================================
   // (ADDED) Load user info from SecureStore
@@ -248,6 +248,21 @@ const getWeatherIcon = (state?: WeatherState) => {
     }
   }, []);
 
+  // Rooms are user-owned metadata that almost never changes during a
+  // session. Fetch them once when the screen gains focus — the realtime
+  // socket handles device state from there on out.
+  const loadRooms = useCallback(async () => {
+    try {
+      const roomsRes = await api.get<any>(ENDPOINTS.ROOMS.LIST, { requireAuth: true });
+      if (roomsRes.success && roomsRes.data?.rooms) {
+        setRooms(roomsRes.data.rooms);
+        DeviceCache.saveRooms(roomsRes.data.rooms);
+      }
+    } catch {
+      // silent — cached rooms already on screen
+    }
+  }, []);
+
   const loadDevices = useCallback(
     async (options: { isRefresh?: boolean; silent?: boolean } = {}) => {
       const { isRefresh = false, silent = false } = options;
@@ -282,17 +297,6 @@ const getWeatherIcon = (state?: WeatherState) => {
 
         // Save to cache for offline use
         DeviceCache.saveDevices(freshDevices);
-
-        // Load rooms (silent, non-blocking)
-        try {
-          const roomsRes = await api.get<any>(ENDPOINTS.ROOMS.LIST, { requireAuth: true });
-          if (roomsRes.success && roomsRes.data?.rooms) {
-            setRooms(roomsRes.data.rooms);
-            DeviceCache.saveRooms(roomsRes.data.rooms);
-          }
-        } catch {
-          // silent
-        }
       } catch (error: any) {
         if (error?.name === 'AbortError') return;
         // Cloud unreachable — cached devices already showing, fail silently
@@ -311,7 +315,7 @@ const getWeatherIcon = (state?: WeatherState) => {
       setActionLoading(actionKey);
 
       try {
-        // Local-first: tries local network, falls back to cloud
+        // Local-first: tries local network, falls back to cloud.
         const result = await smartSendCommand(serialNumber, command, params);
 
         if (!result.success) {
@@ -324,14 +328,18 @@ const getWeatherIcon = (state?: WeatherState) => {
           return;
         }
 
-        loadDevices({ silent: true });
+        // No GET refetch here — the firmware will MQTT-report the new
+        // state, and the backend pushes "device:update" over the socket.
+        // The home-screen subscription merges that patch into local
+        // state, so a manual refetch would be redundant (and would also
+        // hit the cloud even on a fully-local command).
       } catch {
         Alert.alert('Error', 'Failed to send command.');
       } finally {
         setActionLoading(null);
       }
     },
-    [handleAuthError, loadDevices]
+    [handleAuthError]
   );
 
   const handleSendCommand = useCallback(
@@ -382,11 +390,15 @@ const getWeatherIcon = (state?: WeatherState) => {
 
   useFocusEffect(
     useCallback(() => {
-      // 1. Show cached devices immediately, then fetch from cloud
+      // 1. Hydrate from cache first so the UI is never blank on cold focus.
       loadCachedDevices().then(() => {
-        // 4. Fetch fresh data from cloud (after cache is loaded)
+        // Fetch the canonical device list ONCE when the screen is focused.
+        // From here on, the realtime socket keeps it in sync — no polling.
         loadDevices();
       });
+
+      // Rooms — fetched once per focus visit, per the product requirement.
+      loadRooms();
 
       // 2. Start local network discovery (mDNS)
       startLocalDiscovery();
@@ -395,7 +407,7 @@ const getWeatherIcon = (state?: WeatherState) => {
         setLocalSerials(new Set(serialNumbers));
       });
 
-      // 3. Listen for local status updates and merge into device state
+      // 3. Local-network status overrides (mDNS-reachable devices).
       const unsubscribeStatus = onLocalStatusUpdate((serialNumber, status) => {
         setDevices((prev) =>
           prev.map((d) => {
@@ -413,22 +425,52 @@ const getWeatherIcon = (state?: WeatherState) => {
         );
       });
 
-      // 4. Poll for updates (cloud)
-      pollIntervalRef.current = setInterval(() => {
-        loadDevices({ silent: true });
-      }, APP_CONFIG.DEVICE_POLL_INTERVAL);
+      // 4. Realtime cloud updates from the backend.
+      //    The backend pushes a partial device patch whenever an MQTT
+      //    message from the firmware updates the DB. We merge it in
+      //    place — no GET request needed.
+      connectSocket().catch(() => {});
+
+      const unsubscribeUpdate = onSocketEvent('device:update', (patch: any) => {
+        if (!patch?.serialNumber) return;
+        setDevices((prev) =>
+          prev.map((d) => {
+            if (d.serialNumber !== patch.serialNumber) return d;
+            return {
+              ...d,
+              ...(patch.name !== undefined ? { name: patch.name } : {}),
+              ...(patch.isOnline !== undefined ? { isOnline: patch.isOnline } : {}),
+              ...(patch.lastSeen !== undefined ? { lastSeen: patch.lastSeen } : {}),
+              ...(patch.deviceType !== undefined ? { deviceType: patch.deviceType } : {}),
+              state: patch.state ? { ...d.state, ...patch.state } : d.state,
+            };
+          })
+        );
+      });
+
+      const unsubscribePaired = onSocketEvent('device:paired', (device: any) => {
+        if (!device?.serialNumber) return;
+        setDevices((prev) => {
+          if (prev.some((d) => d.serialNumber === device.serialNumber)) return prev;
+          return [device, ...prev];
+        });
+      });
+
+      const unsubscribeUnpaired = onSocketEvent('device:unpaired', (data: any) => {
+        if (!data?.serialNumber) return;
+        setDevices((prev) => prev.filter((d) => d.serialNumber !== data.serialNumber));
+      });
 
       return () => {
         unsubscribeLocalDevices();
         unsubscribeStatus();
-        if (pollIntervalRef.current) {
-          clearInterval(pollIntervalRef.current);
-          pollIntervalRef.current = null;
-        }
+        unsubscribeUpdate();
+        unsubscribePaired();
+        unsubscribeUnpaired();
         abortControllerRef.current?.abort();
         stopLocalDiscovery();
       };
-    }, [loadDevices, loadCachedDevices])
+    }, [loadDevices, loadCachedDevices, loadRooms])
   );
 
   const handleRefresh = useCallback(() => {

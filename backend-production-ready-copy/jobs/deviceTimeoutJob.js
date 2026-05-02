@@ -1,6 +1,6 @@
 const Device = require('../models/Device');
 const DeviceLog = require('../models/DeviceLog');
-const { emitToAdmins } = require('../config/socket');
+const { emitToAdminDevicesView, emitToDeviceWatchers } = require('../config/socket');
 
 const HEARTBEAT_TIMEOUT_MS = parseInt(process.env.HEARTBEAT_TIMEOUT_MS, 10) || 2 * 60 * 1000;
 const CHECK_INTERVAL_MS = parseInt(process.env.DEVICE_CHECK_INTERVAL_MS, 10) || 60 * 1000;
@@ -36,16 +36,19 @@ const checkDeviceTimeouts = async () => {
       }));
       await DeviceLog.insertMany(logs);
 
-      // Notify admin dashboards so live counts and per-device status badges
-      // update immediately, instead of staying stale until a manual refresh.
+      // Match the MQTT status pattern: devices view + per-device room.
+      // Status transitions are rare enough that the duplicate emit cost is
+      // negligible compared to keeping the two views in sync.
       for (const d of timedOutDevices) {
-        emitToAdmins('device:status', {
+        const payload = {
           serialNumber: d.serialNumber,
           isOnline: false,
           lastSeen: d.lastSeen,
           deviceType: d.deviceType,
           name: d.name,
-        });
+        };
+        emitToAdminDevicesView('device:status', payload);
+        emitToDeviceWatchers(d.serialNumber, 'device:status', payload);
       }
     }
   } catch (error) {

@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { getDashboard } from '@/lib/api';
 import { useToast } from '@/components/Toast';
 import { getErrorMessage } from '@/lib/types';
-import { useSocket } from '@/lib/socket';
+import { useSocket, useAdminSubscription } from '@/lib/socket';
 import StatCard from '@/components/StatCard';
 import { Users, Cpu, Wifi, WifiOff, ShieldAlert, Activity, Database, Radio, Zap } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
@@ -31,6 +31,9 @@ export default function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const { connected, on } = useSocket();
+  // Home dashboard tracks fleet-wide online/offline counts; subscribe to the
+  // devices room so device:status events reach this page.
+  useAdminSubscription({ topic: 'devices' });
   const [liveEvents, setLiveEvents] = useState<{ serialNumber: string; isOnline: boolean; time: string }[]>([]);
 
   useEffect(() => {

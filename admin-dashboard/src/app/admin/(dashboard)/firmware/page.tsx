@@ -153,12 +153,15 @@ export default function FirmwarePage() {
 
   useEffect(() => { fetchFirmwares(); fetchStats(); fetchOtaStatus(); }, [fetchFirmwares, fetchStats, fetchOtaStatus]);
 
-  // Real-time OTA progress updates — handler must be stable so we don't
-  // re-subscribe on every render.
-  const handleOtaProgress = useCallback(() => {
+  // Real-time OTA lifecycle updates (initiated / terminal status / cleared).
+  // Lifecycle events are coarse — fine progress % only goes to the per-device
+  // room, which the device detail page subscribes to. The firmware fleet
+  // view just refetches the list whenever a lifecycle change happens; the
+  // 5s safety-net polling below fills in % during in-flight downloads.
+  const handleOtaLifecycle = useCallback(() => {
     fetchOtaStatus();
   }, [fetchOtaStatus]);
-  useSocketEvent('ota:progress', handleOtaProgress);
+  useSocketEvent('ota:lifecycle', handleOtaLifecycle);
 
   // Safety-net polling while updates are in-flight: if the broker drops a
   // progress event we still converge to the right state within ~5s.

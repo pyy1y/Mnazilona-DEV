@@ -9,7 +9,7 @@ const DeviceLog = require('../models/DeviceLog');
 const AuditLog = require('../models/AuditLog');
 const Notification = require('../models/Notification');
 const Room = require('../models/Room');
-const { topicOf, publishMessage, isMqttHealthy } = require('../config/mqtt');
+const { topicOf, publishMessage, isMqttHealthy, invalidateDeviceMeta } = require('../config/mqtt');
 const { isHealthy: isDbHealthy } = require('../config/database');
 const { generateToken, generateRefreshToken, REFRESH_TOKEN_EXPIRY_MS } = require('../utils/helpers');
 const { buildCommandHmac } = require('../utils/commandSigner');
@@ -17,7 +17,7 @@ const { getStats: getRateLimitStats, getRecentEvents, getTopOffenders } = requir
 const Firmware = require('../models/Firmware');
 const IPBlacklist = require('../models/IPBlacklist');
 const AnomalyAlert = require('../models/AnomalyAlert');
-const { emitToAdmins } = require('../config/socket');
+const { emitToAdminLobby, emitToAdminDevicesView, emitToDeviceWatchers, emitToUser } = require('../config/socket');
 const { forceRefreshBlacklist } = require('../middleware/ipBlacklist');
 const { trackFailedLogin, trackAdminAction } = require('../services/anomalyDetector');
 const { sendVerificationCode, verifyCode } = require('../services/codeService');
@@ -447,6 +447,13 @@ exports.registerDevice = async (req, res) => {
 
     await audit(req, 'device_register', device.serialNumber);
 
+    // Lobby notification — the allowlist page (or a future "new devices"
+    // badge) can react. The serial alone is enough; the page refetches.
+    emitToAdminLobby('device:registered', {
+      serialNumber: device.serialNumber,
+      deviceType: device.deviceType,
+    });
+
     res.status(201).json({
       message: 'Device registered successfully',
       device: {
@@ -777,6 +784,15 @@ exports.unpairDevice = async (req, res) => {
       source: 'server',
     });
 
+    // Ownership changed — invalidate the MQTT meta cache so subsequent device
+    // messages don't fan out to the previous owner. Then notify both the
+    // previous owner's mobile sockets and admin dashboards.
+    invalidateDeviceMeta(cleanSerial);
+    if (previousOwner) {
+      emitToUser(previousOwner, 'device:unpaired', { serialNumber: cleanSerial });
+    }
+    emitToAdminDevicesView('device:unpaired', { serialNumber: cleanSerial });
+
     await audit(req, 'device_unpair', cleanSerial, { previousOwner });
     res.json({ message: 'Device unpaired successfully' });
   } catch (error) {
@@ -814,6 +830,28 @@ exports.transferDevice = async (req, res) => {
       message: `Device transferred to ${newOwner.email} by admin`,
       source: 'server',
     });
+
+    // Owner change — invalidate the cached owner so subsequent MQTT events
+    // route to the new owner's sockets, not the previous owner's.
+    invalidateDeviceMeta(cleanSerial);
+
+    // Tell the old owner the device left their account.
+    if (previousOwner) {
+      emitToUser(previousOwner, 'device:unpaired', { serialNumber: cleanSerial });
+    }
+    // Tell the new owner they have a new device. We re-fetch with populate so
+    // the mobile app can render the row without an extra HTTP call.
+    const populated = await Device.findById(device._id)
+      .populate('owner', 'name email')
+      .lean();
+    if (populated) {
+      emitToUser(newOwnerId, 'device:paired', populated);
+      emitToAdminDevicesView('device:transferred', {
+        serialNumber: cleanSerial,
+        previousOwner,
+        newOwner: { _id: newOwnerId, name: newOwner.name, email: newOwner.email },
+      });
+    }
 
     await audit(req, 'device_transfer', cleanSerial, {
       previousOwner,
@@ -1400,16 +1438,19 @@ exports.pushOtaUpdate = async (req, res) => {
         }
       );
 
-      // Push the "notified" state to admin dashboards so the OTA panel
-      // updates immediately instead of waiting for the device's first
-      // ota/progress message (which can be several seconds out).
-      emitToAdmins('ota:progress', {
+      // OTA initiated: lifecycle event to the lobby so the firmware fleet
+      // panel refreshes, plus the full progress payload to the per-device
+      // room so the device detail page shows the "notified" state without
+      // waiting for the first ota/progress MQTT message.
+      const otaPayload = {
         serialNumber: device.serialNumber,
         status: 'notified',
         progress: 0,
         version: firmware.version,
         error: null,
-      });
+      };
+      emitToAdminLobby('ota:lifecycle', otaPayload);
+      emitToDeviceWatchers(device.serialNumber, 'ota:progress', otaPayload);
 
       await DeviceLog.create({
         serialNumber: device.serialNumber,
@@ -1462,13 +1503,15 @@ exports.clearOtaStatus = async (req, res) => {
     );
     if (!result) return res.status(404).json({ message: 'Device not found' });
 
-    emitToAdmins('ota:progress', {
+    const clearedPayload = {
       serialNumber,
       status: 'idle',
       progress: 0,
       version: null,
       error: null,
-    });
+    };
+    emitToAdminLobby('ota:lifecycle', clearedPayload);
+    emitToDeviceWatchers(serialNumber, 'ota:progress', clearedPayload);
 
     res.json({ message: 'OTA status cleared', serialNumber });
   } catch (error) {
@@ -1488,7 +1531,9 @@ exports.clearAllOtaStatus = async (req, res) => {
       { $set: OTA_CLEAR_FIELDS }
     );
 
-    emitToAdmins('ota:progress', { cleared: 'all' });
+    // Bulk clear — fan out a single lobby event; per-device rooms re-fetch
+    // on next interaction or via the firmware page's safety-net polling.
+    emitToAdminLobby('ota:lifecycle', { cleared: 'all' });
 
     res.json({ message: 'All stuck OTA states cleared', cleared: result.modifiedCount });
   } catch (error) {

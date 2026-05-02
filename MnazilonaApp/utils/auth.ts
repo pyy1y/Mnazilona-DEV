@@ -6,6 +6,7 @@ import { saveUser, clearUser } from './userStorage';
 import { jwtDecode } from 'jwt-decode';
 import { TokenManager, UserDataManager, api } from './api';
 import { ENDPOINTS } from '../constants/api';
+import { connectSocket, disconnectSocket } from './socket';
 
 // ======================================
 // Types
@@ -89,6 +90,10 @@ export async function checkAuthState(): Promise<{
       return { isAuthenticated: false, user: null, token: null };
     }
 
+    // App was opened with an existing valid session — open the realtime
+    // channel right away so device updates start streaming.
+    connectSocket().catch(() => {});
+
     return { isAuthenticated: true, user, token };
   } catch {
     await logout();
@@ -136,6 +141,9 @@ export async function login(
       await UserDataManager.set(userData);
     }
 
+    // 6) Open the realtime channel — device updates start flowing here.
+    connectSocket().catch(() => {});
+
     return true;
   } catch (e) {
     if (__DEV__) console.error("login() failed:", e);
@@ -165,6 +173,9 @@ export async function logout(): Promise<void> {
         }
       }
     } finally {
+      // Drop the realtime channel before we wipe the token, otherwise the
+      // next reconnect attempt will fire with stale credentials.
+      disconnectSocket();
       await UserDataManager.clear();
       await TokenManager.remove();
       await clearUser();

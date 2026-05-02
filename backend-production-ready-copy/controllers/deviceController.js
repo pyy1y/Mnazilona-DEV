@@ -7,7 +7,8 @@ const DeviceLog = require('../models/DeviceLog');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
 const Firmware = require('../models/Firmware');
-const { topicOf, publishMessage, MQTT_BROKER_HOST } = require('../config/mqtt');
+const { topicOf, publishMessage, MQTT_BROKER_HOST, invalidateDeviceMeta } = require('../config/mqtt');
+const { emitToUser, emitToAdminDevicesView } = require('../config/socket');
 const { canUserAccessDevice, getDeviceACL } = require('../services/mqttAclService');
 const { trackDeviceCommand, trackPairAttempt } = require('../services/anomalyDetector');
 const { buildCommandHmac } = require('../utils/commandSigner');
@@ -280,6 +281,20 @@ exports.pair = async (req, res) => {
     allowedDevice.activatedBy = userId;
     await allowedDevice.save();
 
+    // Ownership changed - drop the cached owner so future MQTT messages
+    // route socket events to the new owner.
+    invalidateDeviceMeta(cleanSerial);
+
+    // Push the newly paired device to the user's app sockets so the home
+    // screen can render it without an extra HTTP roundtrip.
+    const paired = sanitizeDeviceResponse(device);
+    emitToUser(userId, 'device:paired', paired);
+
+    // Admin devices index: receive the new row so it can prepend without
+    // a refetch. Lobby notification (for a future "new pairings" badge)
+    // can be added when there's a consumer.
+    emitToAdminDevicesView('device:paired', paired);
+
     try {
       const topic = topicOf(cleanSerial, 'command');
       await publishMessage(topic, {
@@ -338,6 +353,8 @@ exports.unpair = async (req, res) => {
       return res.status(404).json({ message: 'Device not found or not owned by you' });
     }
 
+    const previousOwner = device.owner;
+
     device.owner = null;
     device.pairedAt = null;
     await device.save();
@@ -348,6 +365,13 @@ exports.unpair = async (req, res) => {
       { serialNumber: cleanSerial },
       { activatedBy: null }
     );
+
+    // Ownership changed - drop cache + tell the previous owner's sockets
+    invalidateDeviceMeta(cleanSerial);
+    if (previousOwner) {
+      emitToUser(previousOwner, 'device:unpaired', { serialNumber: cleanSerial });
+    }
+    emitToAdminDevicesView('device:unpaired', { serialNumber: cleanSerial });
 
     try {
       const topic = topicOf(cleanSerial, 'command');
@@ -595,6 +619,13 @@ exports.renameDevice = async (req, res) => {
       type: 'info',
       message: `Device renamed from "${oldName}" to "${trimmedName}"`,
       source: 'user',
+    });
+
+    // Push the new name to all of this user's app sockets so the rename
+    // shows up everywhere (other devices, other tabs) instantly.
+    emitToUser(userId, 'device:update', {
+      serialNumber: cleanSerial,
+      name: trimmedName,
     });
 
     res.json({

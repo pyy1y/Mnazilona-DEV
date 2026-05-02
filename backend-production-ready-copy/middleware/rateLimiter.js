@@ -2,7 +2,7 @@ const rateLimit = require('express-rate-limit');
 const RedisStore = require('rate-limit-redis').default;
 const { getRedisClient } = require('../config/redis');
 const { recordRateLimitHit } = require('../config/rateLimitStore');
-const { emitToAdmins } = require('../config/socket');
+const { emitToAdminMonitoring } = require('../config/socket');
 
 const RATE_LIMIT_DISABLED = process.env.DISABLE_RATE_LIMIT === 'true';
 
@@ -15,7 +15,10 @@ const createLimitHandler = (type) => (req, res) => {
 
   recordRateLimitHit(type, req.ip, req.originalUrl);
 
-  emitToAdmins('ratelimit:hit', {
+  // Rate-limit hits are firehose-y under attack — only admins on the live
+  // monitoring page need them in real time. Other admins see the running
+  // counts via the existing recordRateLimitHit() store on next REST fetch.
+  emitToAdminMonitoring('ratelimit:hit', {
     type,
     ip: req.ip,
     path: req.originalUrl,

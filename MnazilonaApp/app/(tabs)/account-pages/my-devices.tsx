@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   StyleSheet,
   Text,
@@ -15,11 +15,12 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { api, isAuthError } from '../../../utils/api';
 import { useAuth } from '../../../hooks/useAuth';
 import { ENDPOINTS } from '../../../constants/api';
+import { connectSocket, onSocketEvent } from '../../../utils/socket';
 
 const BRAND_COLOR = '#2E5B8E';
-const LOG_POLL_INTERVAL = 5000;
 const WARRANTY_YEARS = 2;
 const WARRANTY_DAYS = WARRANTY_YEARS * 365;
+const LOGS_MAX_BUFFER = 200;
 
 type TabType = 'logs' | 'warranty';
 
@@ -65,7 +66,6 @@ export default function MyDevicesScreen() {
   const [logsPage, setLogsPage] = useState(1);
   const [hasMoreLogs, setHasMoreLogs] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Warranty state
   const [devices, setDevices] = useState<DeviceWarranty[]>([]);
@@ -142,25 +142,43 @@ export default function MyDevicesScreen() {
     setDevicesLoading(false);
   }, [fetchDevices]);
 
-  // Start/stop polling for logs when tab is active
+  // Logs / warranty: fetch once when the tab is shown, then keep the logs
+  // tab live via the realtime socket. The backend pushes a `device:log`
+  // event whenever a log row is written for a device this user owns.
   useFocusEffect(
     useCallback(() => {
       if (activeTab === 'logs') {
         loadInitialLogs();
-        pollTimerRef.current = setInterval(() => {
-          fetchLogs(1, false);
-        }, LOG_POLL_INTERVAL);
-      } else {
-        loadDevices();
+        connectSocket().catch(() => {});
+
+        const unsubscribe = onSocketEvent('device:log', (entry: any) => {
+          if (!entry?.serialNumber || !entry?.timestamp) return;
+          const incoming: DeviceLog = {
+            serialNumber: entry.serialNumber,
+            deviceName: entry.deviceName,
+            type: entry.type,
+            message: entry.message,
+            source: entry.source,
+            timestamp: entry.timestamp,
+          };
+          setLogs((prev) => {
+            // Reset to page 1 view; cap buffer so the list never grows
+            // unbounded while the user keeps the tab open for a long time.
+            const next = [incoming, ...prev];
+            return next.length > LOGS_MAX_BUFFER
+              ? next.slice(0, LOGS_MAX_BUFFER)
+              : next;
+          });
+        });
+
+        return () => {
+          unsubscribe();
+        };
       }
 
-      return () => {
-        if (pollTimerRef.current) {
-          clearInterval(pollTimerRef.current);
-          pollTimerRef.current = null;
-        }
-      };
-    }, [activeTab, loadInitialLogs, fetchLogs, loadDevices])
+      loadDevices();
+      return () => {};
+    }, [activeTab, loadInitialLogs, loadDevices])
   );
 
   // ── Warranty helpers ──

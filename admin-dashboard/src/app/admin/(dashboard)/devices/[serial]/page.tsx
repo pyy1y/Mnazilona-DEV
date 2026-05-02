@@ -15,7 +15,7 @@ import {
 import { useToast } from '@/components/Toast';
 import { getErrorMessage } from '@/lib/types';
 import ConfirmDialog from '@/components/ConfirmDialog';
-import { useSocket } from '@/lib/socket';
+import { useSocket, useAdminSubscription } from '@/lib/socket';
 import StatusBadge from '@/components/StatusBadge';
 import {
   ArrowLeft, Wifi, WifiOff, Lock, Unlock, Terminal, Unplug,
@@ -89,6 +89,8 @@ export default function DeviceDetailPage() {
   const [commandModal, setCommandModal] = useState(false);
   const [command, setCommand] = useState('');
   const { connected, on } = useSocket();
+  // Per-device room: receives heartbeat / dp_report / ota:progress for this serial.
+  useAdminSubscription(serial ? { topic: 'device', id: serial } : null);
 
   // Command cooldown to prevent rapid-fire
   const lastCommandTime = useRef(0);
@@ -156,7 +158,31 @@ export default function DeviceDetailPage() {
       // so the "Update available" badge resolves correctly.
       if (event.status === 'success') fetchDetail();
     });
-    return () => { offStatus(); offDp(); offHb(); offOta(); };
+    // Snapshot: server pushes this once on (re)connect, after we've joined
+    // admin:device:<sn>. Patch live-state fields onto the existing record;
+    // we don't refetch logs/firmware (those came from the initial REST call
+    // and the user's view of historical logs shouldn't churn on reconnect).
+    const offSnap = on('device:snapshot', (snap) => {
+      if (snap.serialNumber !== serial) return;
+      setDevice((prev) => prev
+        ? {
+            ...prev,
+            isOnline: snap.isOnline,
+            lastSeen: snap.lastSeen || prev.lastSeen,
+            state: { ...(prev.state || {}), ...(snap.state || {}) },
+            firmwareVersion: snap.firmwareVersion ?? prev.firmwareVersion,
+          }
+        : prev);
+      if (snap.otaStatus) {
+        setOtaLive({
+          status: snap.otaStatus,
+          targetVersion: snap.otaTargetVersion ?? null,
+          progress: typeof snap.otaProgress === 'number' ? snap.otaProgress : 0,
+          error: snap.otaError ?? null,
+        });
+      }
+    });
+    return () => { offStatus(); offDp(); offHb(); offOta(); offSnap(); };
   }, [on, serial, fetchDetail]);
 
   // Search for transfer target users (debounced)

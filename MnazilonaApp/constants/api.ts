@@ -2,8 +2,8 @@
 // ======================================
 // API Configuration
 // ======================================
-const DEFAULT_DEV_API_URL = 'http://192.168.8.143:3000';
-const DEFAULT_PROD_API_URL = 'https://91.98.207.169';
+const DEFAULT_DEV_API_URL = 'https://mnazilona.xyz/api';
+const DEFAULT_PROD_API_URL = 'https://mnazilona.xyz/api';
 const isDev = __DEV__;
 
 function normalizeApiUrl(url: string): string {
@@ -94,11 +94,12 @@ export const APP_CONFIG = {
   USER_DATA_KEY: 'user_data',
   OTP_LENGTH: 6,
   OTP_RESEND_SECONDS: 60,
-  DEVICE_POLL_INTERVAL: 5000,
   REQUEST_TIMEOUT: 30000,
   // Local network communication
   LOCAL_DEVICE_PORT: 8080,
   LOCAL_COMMAND_TIMEOUT: 5000,
+  // Realtime
+  SOCKET_NAMESPACE: '/app',
 } as const;
 
 // ======================================
