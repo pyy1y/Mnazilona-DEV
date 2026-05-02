@@ -1,23 +1,14 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { APP_NAME } from "@/config/site";
+import { arabicFont } from "./fonts";
 import { AuthProvider } from "@/lib/auth";
 import { ToastProvider } from "@/components/Toast";
 import ErrorBoundary from "@/components/ErrorBoundary";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
 export const metadata: Metadata = {
-  title: "Mnazilona Admin",
-  description: "Mnazilona IoT Admin Dashboard",
+  title: APP_NAME.en,
+  description: "A modern smart home mobile app for connected living.",
 };
 
 export default function RootLayout({
@@ -28,7 +19,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${arabicFont.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-gray-50">
         <ErrorBoundary>

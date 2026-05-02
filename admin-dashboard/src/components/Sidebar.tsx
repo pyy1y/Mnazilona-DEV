@@ -16,20 +16,21 @@ import {
   AlertTriangle,
   LogOut,
 } from 'lucide-react';
+import { APP_NAME } from '@/app/constants';
 import { useAuth } from '@/lib/auth';
 
 const navItems = [
-  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/dashboard/users', label: 'Users', icon: Users },
-  { href: '/dashboard/devices', label: 'Devices', icon: Cpu },
-  { href: '/dashboard/allowlist', label: 'Allowlist', icon: ListChecks },
-  { href: '/dashboard/logs', label: 'Logs', icon: ScrollText },
-  { href: '/dashboard/security', label: 'Security', icon: Shield },
-  { href: '/dashboard/firmware', label: 'Firmware', icon: Package },
-  { href: '/dashboard/audit', label: 'Audit Log', icon: ClipboardList },
-  { href: '/dashboard/rate-limits', label: 'Rate Limits', icon: ShieldBan },
-  { href: '/dashboard/ip-blacklist', label: 'IP Blacklist', icon: Ban },
-  { href: '/dashboard/anomalies', label: 'Anomalies', icon: AlertTriangle },
+  { href: '/admin', label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/admin/users', label: 'Users', icon: Users },
+  { href: '/admin/devices', label: 'Devices', icon: Cpu },
+  { href: '/admin/allowlist', label: 'Allowlist', icon: ListChecks },
+  { href: '/admin/logs', label: 'Logs', icon: ScrollText },
+  { href: '/admin/security', label: 'Security', icon: Shield },
+  { href: '/admin/firmware', label: 'Firmware', icon: Package },
+  { href: '/admin/audit', label: 'Audit Log', icon: ClipboardList },
+  { href: '/admin/rate-limits', label: 'Rate Limits', icon: ShieldBan },
+  { href: '/admin/ip-blacklist', label: 'IP Blacklist', icon: Ban },
+  { href: '/admin/anomalies', label: 'Anomalies', icon: AlertTriangle },
 ];
 
 export default function Sidebar() {
@@ -40,7 +41,7 @@ export default function Sidebar() {
     <aside className="w-64 bg-gray-900 text-white min-h-screen flex flex-col">
       {/* Logo */}
       <div className="p-6 border-b border-gray-800">
-        <h1 className="text-xl font-bold">Mnazilona</h1>
+        <h1 className="text-xl font-bold">{APP_NAME.en}</h1>
         <p className="text-gray-400 text-sm mt-1">Admin Dashboard</p>
       </div>
 
@@ -48,8 +49,8 @@ export default function Sidebar() {
       <nav className="flex-1 p-4 space-y-1">
         {navItems.map((item) => {
           const isActive =
-            item.href === '/dashboard'
-              ? pathname === '/dashboard'
+            item.href === '/admin'
+              ? pathname === '/admin'
               : pathname.startsWith(item.href);
 
           return (

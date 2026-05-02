@@ -55,7 +55,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(() => {
     clearSession();
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    router.push('/login');
+    router.push('/admin/login');
   }, [clearSession, router]);
 
   // Session timeout: reset on user activity
@@ -129,7 +129,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     setToken(newToken);
     setAdmin(adminData);
-    router.push('/dashboard');
+    router.push('/admin');
   };
 
   return (
