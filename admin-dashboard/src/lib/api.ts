@@ -1,16 +1,20 @@
 import axios from 'axios';
 import Cookies from 'js-cookie';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000').replace(/\/$/, '');
+const ADMIN_API_BASE = `${API_BASE}/admin`;
+const AUTH_API_BASE = `${API_BASE}/auth`;
 
 // NOTE: When you get a domain, update NEXT_PUBLIC_API_URL to use HTTPS:
 // NEXT_PUBLIC_API_URL=https://your-domain.com
 
 const api = axios.create({
-  baseURL: `${API_BASE}/admin`,
+  baseURL: ADMIN_API_BASE,
   timeout: 15000,
   headers: { 'Content-Type': 'application/json' },
 });
+
+const adminApiUrl = (path: string) => `${ADMIN_API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
 
 export interface BlogPost {
   id: string;
@@ -128,7 +132,7 @@ api.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        const { data } = await axios.post(`${API_BASE}/auth/refresh-token`, { refreshToken });
+        const { data } = await axios.post(`${AUTH_API_BASE}/refresh-token`, { refreshToken });
         Cookies.set('admin_token', data.token, { sameSite: 'strict', secure: typeof window !== 'undefined' && window.location.protocol === 'https:', path: '/' });
         Cookies.set('admin_refresh_token', data.refreshToken, { sameSite: 'strict', secure: typeof window !== 'undefined' && window.location.protocol === 'https:', path: '/', expires: 7 });
         processQueue(null, data.token);
@@ -153,10 +157,16 @@ api.interceptors.response.use(
 
 // Auth (2-step OTP login)
 export const adminLoginSendCode = (email: string, password: string) =>
-  api.post('/login/send-code', { email, password });
+  axios.post(adminApiUrl('/login/send-code'), { email, password }, {
+    headers: { 'Content-Type': 'application/json' },
+    timeout: 15000,
+  });
 
 export const adminLoginVerifyCode = (email: string, code: string) =>
-  api.post('/login/verify-code', { email, code });
+  axios.post(adminApiUrl('/login/verify-code'), { email, code }, {
+    headers: { 'Content-Type': 'application/json' },
+    timeout: 15000,
+  });
 
 // Dashboard
 export const getDashboard = () => api.get('/dashboard');
