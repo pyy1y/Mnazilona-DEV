@@ -131,7 +131,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     setToken(newToken);
     setAdmin(adminData);
-    router.push(adminPath('/', pathname));
+    router.replace('/admin');
+    router.refresh();
   };
 
   return (
