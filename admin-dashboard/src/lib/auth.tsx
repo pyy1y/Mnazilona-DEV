@@ -1,8 +1,9 @@
 'use client';
 
 import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import Cookies from 'js-cookie';
+import { adminPath } from './adminRoutes';
 import { adminLoginSendCode, adminLoginVerifyCode, getDashboard } from './api';
 import { disconnectSocket } from './socket';
 
@@ -40,6 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
+  const pathname = usePathname();
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearSession = useCallback(() => {
@@ -55,8 +57,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(() => {
     clearSession();
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    router.push('/admin/login');
-  }, [clearSession, router]);
+    router.push(adminPath('/login', pathname));
+  }, [clearSession, pathname, router]);
 
   // Session timeout: reset on user activity
   const resetSessionTimeout = useCallback(() => {
@@ -129,7 +131,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     setToken(newToken);
     setAdmin(adminData);
-    router.push('/admin');
+    router.push(adminPath('/', pathname));
   };
 
   return (

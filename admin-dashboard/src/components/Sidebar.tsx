@@ -17,20 +17,21 @@ import {
   LogOut,
 } from 'lucide-react';
 import { APP_NAME } from '@/app/constants';
+import { adminPath } from '@/lib/adminRoutes';
 import { useAuth } from '@/lib/auth';
 
 const navItems = [
-  { href: '/admin', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/admin/users', label: 'Users', icon: Users },
-  { href: '/admin/devices', label: 'Devices', icon: Cpu },
-  { href: '/admin/allowlist', label: 'Allowlist', icon: ListChecks },
-  { href: '/admin/logs', label: 'Logs', icon: ScrollText },
-  { href: '/admin/security', label: 'Security', icon: Shield },
-  { href: '/admin/firmware', label: 'Firmware', icon: Package },
-  { href: '/admin/audit', label: 'Audit Log', icon: ClipboardList },
-  { href: '/admin/rate-limits', label: 'Rate Limits', icon: ShieldBan },
-  { href: '/admin/ip-blacklist', label: 'IP Blacklist', icon: Ban },
-  { href: '/admin/anomalies', label: 'Anomalies', icon: AlertTriangle },
+  { href: '/', label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/users', label: 'Users', icon: Users },
+  { href: '/devices', label: 'Devices', icon: Cpu },
+  { href: '/allowlist', label: 'Allowlist', icon: ListChecks },
+  { href: '/logs', label: 'Logs', icon: ScrollText },
+  { href: '/security', label: 'Security', icon: Shield },
+  { href: '/firmware', label: 'Firmware', icon: Package },
+  { href: '/audit', label: 'Audit Log', icon: ClipboardList },
+  { href: '/rate-limits', label: 'Rate Limits', icon: ShieldBan },
+  { href: '/ip-blacklist', label: 'IP Blacklist', icon: Ban },
+  { href: '/anomalies', label: 'Anomalies', icon: AlertTriangle },
 ];
 
 export default function Sidebar() {
@@ -48,15 +49,16 @@ export default function Sidebar() {
       {/* Navigation */}
       <nav className="flex-1 p-4 space-y-1">
         {navItems.map((item) => {
+          const href = adminPath(item.href, pathname);
           const isActive =
-            item.href === '/admin'
-              ? pathname === '/admin'
-              : pathname.startsWith(item.href);
+            item.href === '/'
+              ? pathname === href || pathname === '/'
+              : pathname === href || pathname.startsWith(`${href}/`);
 
           return (
             <Link
               key={item.href}
-              href={item.href}
+              href={href}
               className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
                 isActive
                   ? 'bg-blue-600 text-white'

@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { getPairedDevices, sendDeviceCommand, unpairDevice, factoryResetDevice } from '@/lib/api';
+import { adminPath } from '@/lib/adminRoutes';
 import { useToast } from '@/components/Toast';
 import { getErrorMessage } from '@/lib/types';
 import { useDebounce } from '@/lib/hooks';
@@ -37,6 +38,7 @@ const DEVICE_TYPES = ['relay', 'light', 'dimmer', 'ac', 'lock', 'water-tank', 's
 
 export default function DevicesPage() {
   const router = useRouter();
+  const pathname = usePathname();
   const toast = useToast();
   const [devices, setDevices] = useState<DeviceItem[]>([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
@@ -234,7 +236,7 @@ export default function DevicesPage() {
       </div>
 
       <DataTable columns={columns} data={devices} pagination={pagination} onPageChange={fetchDevices} loading={loading} emptyMessage="No devices found"
-        onRowClick={(d: DeviceItem) => router.push(`/dashboard/devices/${d.serialNumber}`)} />
+        onRowClick={(d: DeviceItem) => router.push(adminPath(`/devices/${d.serialNumber}`, pathname))} />
 
       {/* Command Modal */}
       {commandModal && (

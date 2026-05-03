@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
+import { adminPath } from '@/lib/adminRoutes';
 import { useAuth } from '@/lib/auth';
 import { useSocket } from '@/lib/socket';
 import Sidebar from '@/components/Sidebar';
@@ -23,12 +24,13 @@ function ConnectionBanner() {
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { admin, loading } = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
     if (!loading && !admin) {
-      router.replace('/admin/login');
+      router.replace(adminPath('/login', pathname));
     }
-  }, [admin, loading, router]);
+  }, [admin, loading, pathname, router]);
 
   if (loading) {
     return (
