@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { Language } from "@/config/site";
-import type { BlogPost } from "@/lib/api";
+import type { BlogPost } from "@/lib/posts";
 
 export default function BlogCard({ post, language }: { post: BlogPost; language: Language }) {
   const isAr = language === "ar";

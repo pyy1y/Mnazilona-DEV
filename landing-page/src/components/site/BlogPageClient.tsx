@@ -1,6 +1,6 @@
 "use client";
 
-import type { BlogPost } from "@/lib/api";
+import type { BlogPost } from "@/lib/posts";
 import BlogCard from "./BlogCard";
 import SiteFooter from "./SiteFooter";
 import SiteHeader from "./SiteHeader";

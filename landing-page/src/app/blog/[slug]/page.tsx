@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import BlogPostPageClient from "@/components/site/BlogPostPageClient";
-import { getPostBySlug, getPosts } from "@/lib/api";
+import { getPostBySlug, getPosts } from "@/lib/posts";
 
 export async function generateStaticParams() {
   const posts = await getPosts();

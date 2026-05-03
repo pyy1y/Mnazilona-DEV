@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import type { BlogPost } from "@/lib/api";
+import type { BlogPost } from "@/lib/posts";
 import SiteFooter from "./SiteFooter";
 import SiteHeader from "./SiteHeader";
 import { useSiteLanguage } from "./useSiteLanguage";
