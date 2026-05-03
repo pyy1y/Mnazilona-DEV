@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth';
 import { useToast } from '@/components/Toast';
 import { APP_NAME } from '@/app/constants';
@@ -9,6 +10,7 @@ import { Lock, Mail, ShieldCheck, ArrowLeft } from 'lucide-react';
 
 export default function LoginPage() {
   const { sendCode, verifyCode } = useAuth();
+  const router = useRouter();
   const toast = useToast();
   const [step, setStep] = useState<'credentials' | 'otp'>('credentials');
   const [email, setEmail] = useState('');
@@ -56,6 +58,13 @@ export default function LoginPage() {
     try {
       await verifyCode(email, code);
       toast.success('Login successful');
+      router.replace('/admin');
+      router.refresh();
+      window.setTimeout(() => {
+        if (window.location.pathname.endsWith('/login')) {
+          window.location.href = '/admin';
+        }
+      }, 250);
     } catch (err: unknown) {
       setError(getErrorMessage(err, 'Verification failed'));
       setOtp(['', '', '', '', '', '']);
