@@ -4,7 +4,11 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 import Cookies from 'js-cookie';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000').replace(/\/$/, '');
+const TOKEN_KEY = 'admin_token';
+
+const getStoredToken = () =>
+  Cookies.get(TOKEN_KEY) || (typeof window !== 'undefined' ? window.localStorage.getItem(TOKEN_KEY) : null);
 
 // Server -> client event payloads (kept in sync with backend emitToAdmins calls)
 export interface DeviceStatusPayload {
@@ -133,7 +137,7 @@ function subscriptionKey(payload: AdminSubscription): string {
 }
 
 function buildSocket(): TypedSocket {
-  const token = Cookies.get('admin_token');
+  const token = getStoredToken();
   const socket = io(`${API_BASE}/admin`, {
     auth: { token },
     transports: ['websocket', 'polling'],
@@ -144,15 +148,15 @@ function buildSocket(): TypedSocket {
   }) as TypedSocket;
 
   // The Manager (`socket.io`) emits `reconnect_attempt`, NOT the socket itself.
-  // We refresh the auth token here so reconnects use the latest cookie value.
+  // We refresh the auth token here so reconnects use the latest stored value.
   socket.io.on('reconnect_attempt', () => {
-    const freshToken = Cookies.get('admin_token');
+    const freshToken = getStoredToken();
     socket.auth = { token: freshToken };
   });
 
   socket.on('connect_error', (err: Error) => {
     if (err.message.includes('auth') || err.message.toLowerCase().includes('unauthorized')) {
-      const freshToken = Cookies.get('admin_token');
+      const freshToken = getStoredToken();
       socket.auth = { token: freshToken };
     }
   });
@@ -226,13 +230,16 @@ export function useSocket() {
 
     const onConnect = () => setConnected(true);
     const onDisconnect = () => setConnected(false);
+    const onConnectError = () => setConnected(false);
 
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
+    socket.on('connect_error', onConnectError);
 
     return () => {
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
+      socket.off('connect_error', onConnectError);
     };
   }, []);
 
