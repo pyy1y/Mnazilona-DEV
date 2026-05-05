@@ -1,8 +1,9 @@
 'use client';
 
 import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import Cookies from 'js-cookie';
+import { adminPath } from './adminRoutes';
 import { adminLoginSendCode, adminLoginVerifyCode, getDashboard } from './api';
 import { disconnectSocket } from './socket';
 
@@ -35,16 +36,41 @@ const COOKIE_OPTIONS = {
   path: '/',
 };
 
+const TOKEN_KEY = 'admin_token';
+const REFRESH_TOKEN_KEY = 'admin_refresh_token';
+const ADMIN_KEY = 'admin';
+
+const getStoredToken = () =>
+  Cookies.get(TOKEN_KEY) || (typeof window !== 'undefined' ? window.localStorage.getItem(TOKEN_KEY) : null);
+
+const getStoredAdmin = (): Admin | null => {
+  if (typeof window === 'undefined') return null;
+  const savedAdmin = window.localStorage.getItem(ADMIN_KEY);
+  if (!savedAdmin) return null;
+  try {
+    return JSON.parse(savedAdmin);
+  } catch {
+    window.localStorage.removeItem(ADMIN_KEY);
+    return null;
+  }
+};
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [admin, setAdmin] = useState<Admin | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
+  const pathname = usePathname();
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearSession = useCallback(() => {
-    Cookies.remove('admin_token');
-    Cookies.remove('admin_refresh_token');
+    Cookies.remove(TOKEN_KEY);
+    Cookies.remove(REFRESH_TOKEN_KEY);
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(TOKEN_KEY);
+      window.localStorage.removeItem(REFRESH_TOKEN_KEY);
+      window.localStorage.removeItem(ADMIN_KEY);
+    }
     setToken(null);
     setAdmin(null);
     // Tear down the singleton socket so the next login doesn't reuse a
@@ -55,8 +81,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(() => {
     clearSession();
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    router.push('/admin/login');
-  }, [clearSession, router]);
+    router.push(adminPath('/login', pathname));
+  }, [clearSession, pathname, router]);
 
   // Session timeout: reset on user activity
   const resetSessionTimeout = useCallback(() => {
@@ -84,13 +110,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // On mount: validate token by making an API call instead of trusting cookie data
   useEffect(() => {
-    const savedToken = Cookies.get('admin_token');
+    const savedToken = getStoredToken();
 
     if (savedToken) {
       setToken(savedToken);
       // Validate token by fetching dashboard (lightweight check)
       getDashboard()
         .then(() => {
+          const savedAdmin = getStoredAdmin();
+          if (savedAdmin) {
+            setAdmin(savedAdmin);
+            return;
+          }
           // Token is valid - decode admin info from token payload
           try {
             const payload = JSON.parse(atob(savedToken.split('.')[1]));
@@ -124,12 +155,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const { token: newToken, refreshToken, admin: adminData } = res.data;
 
     // Store access token (short-lived) and refresh token (long-lived)
-    Cookies.set('admin_token', newToken, COOKIE_OPTIONS);
-    Cookies.set('admin_refresh_token', refreshToken, { ...COOKIE_OPTIONS, expires: 7 });
+    Cookies.set(TOKEN_KEY, newToken, COOKIE_OPTIONS);
+    Cookies.set(REFRESH_TOKEN_KEY, refreshToken, { ...COOKIE_OPTIONS, expires: 7 });
+    window.localStorage.setItem(TOKEN_KEY, newToken);
+    window.localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+    window.localStorage.setItem(ADMIN_KEY, JSON.stringify(adminData));
 
     setToken(newToken);
     setAdmin(adminData);
-    router.push('/admin');
+    router.replace('/admin');
+    router.refresh();
   };
 
   return (

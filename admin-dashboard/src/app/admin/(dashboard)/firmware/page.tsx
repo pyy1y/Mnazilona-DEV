@@ -41,9 +41,9 @@ interface OtaDevice {
   name: string;
   deviceType: string;
   firmwareVersion: string;
-  otaStatus: string;
+  otaStatus?: string | null;
   otaTargetVersion: string;
-  otaProgress: number;
+  otaProgress?: number | null;
   otaError: string | null;
   otaStartedAt: string | null;
   otaCompletedAt: string | null;
@@ -57,7 +57,22 @@ function formatBytes(bytes: number | null) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-function OtaStatusBadge({ status }: { status: string }) {
+function normalizeOtaStatus(status?: string | null) {
+  return String(status ?? 'unknown');
+}
+
+function formatOtaStatus(status?: string | null) {
+  const value = normalizeOtaStatus(status);
+  return value === 'unknown' ? 'Unknown' : value.replace('_', ' ');
+}
+
+function getOtaProgress(progress?: number | null) {
+  if (typeof progress !== 'number') return 0;
+  return Math.min(100, Math.max(0, progress));
+}
+
+function OtaStatusBadge({ status }: { status?: string | null }) {
+  const normalizedStatus = normalizeOtaStatus(status);
   const colors: Record<string, string> = {
     idle: 'bg-gray-100 text-gray-600',
     notified: 'bg-blue-100 text-blue-700',
@@ -70,8 +85,8 @@ function OtaStatusBadge({ status }: { status: string }) {
     rolled_back: 'bg-red-100 text-red-700',
   };
   return (
-    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${colors[status] || 'bg-gray-100 text-gray-600'}`}>
-      {status.replace('_', ' ')}
+    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${colors[normalizedStatus] || 'bg-gray-100 text-gray-600'}`}>
+      {formatOtaStatus(normalizedStatus)}
     </span>
   );
 }
@@ -166,7 +181,7 @@ export default function FirmwarePage() {
   // Safety-net polling while updates are in-flight: if the broker drops a
   // progress event we still converge to the right state within ~5s.
   const activeOtaCount = otaDevices.filter(
-    (d) => !['idle', 'success', 'failed', 'rolled_back'].includes(d.otaStatus)
+    (d) => !['idle', 'success', 'failed', 'rolled_back', 'unknown'].includes(normalizeOtaStatus(d.otaStatus))
   ).length;
   useEffect(() => {
     if (activeOtaCount === 0) return;
@@ -307,26 +322,26 @@ export default function FirmwarePage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {otaDevices.map(d => (
-                <tr key={d.serialNumber} className="hover:bg-gray-50">
+              {otaDevices.map((d, index) => (
+                <tr key={d.serialNumber || `ota-device-${index}`} className="hover:bg-gray-50">
                   <td className="px-6 py-3">
-                    <p className="text-sm font-medium">{d.name || d.serialNumber}</p>
-                    <p className="text-xs text-gray-400">{d.serialNumber}</p>
+                    <p className="text-sm font-medium">{d.name || d.serialNumber || 'Unknown'}</p>
+                    <p className="text-xs text-gray-400">{d.serialNumber || 'N/A'}</p>
                   </td>
                   <td className="px-6 py-3 font-mono text-sm">{d.firmwareVersion || '-'}</td>
                   <td className="px-6 py-3 font-mono text-sm text-blue-600">{d.otaTargetVersion || '-'}</td>
                   <td className="px-6 py-3"><OtaStatusBadge status={d.otaStatus} /></td>
                   <td className="px-6 py-3">
-                    {d.otaStatus === 'downloading' || d.otaStatus === 'installing' ? (
+                    {normalizeOtaStatus(d.otaStatus) === 'downloading' || normalizeOtaStatus(d.otaStatus) === 'installing' ? (
                       <div className="flex items-center gap-2">
                         <div className="w-20 h-2 bg-gray-200 rounded-full overflow-hidden">
-                          <div className="h-full bg-blue-600 rounded-full transition-all" style={{ width: `${d.otaProgress}%` }} />
+                          <div className="h-full bg-blue-600 rounded-full transition-all" style={{ width: `${getOtaProgress(d.otaProgress)}%` }} />
                         </div>
-                        <span className="text-xs text-gray-500">{d.otaProgress}%</span>
+                        <span className="text-xs text-gray-500">{getOtaProgress(d.otaProgress)}%</span>
                       </div>
-                    ) : d.otaStatus === 'success' ? (
+                    ) : normalizeOtaStatus(d.otaStatus) === 'success' ? (
                       <CheckCircle size={16} className="text-green-500" />
-                    ) : d.otaStatus === 'failed' || d.otaStatus === 'rolled_back' ? (
+                    ) : normalizeOtaStatus(d.otaStatus) === 'failed' || normalizeOtaStatus(d.otaStatus) === 'rolled_back' ? (
                       <AlertTriangle size={16} className="text-red-500" />
                     ) : (
                       <span className="text-xs text-gray-400">-</span>
@@ -335,7 +350,8 @@ export default function FirmwarePage() {
                   <td className="px-6 py-3 text-xs text-red-500 max-w-xs truncate">{d.otaError || '-'}</td>
                   <td className="px-6 py-3 text-right">
                     <button
-                      onClick={() => handleClearOta(d.serialNumber)}
+                      onClick={() => d.serialNumber && handleClearOta(d.serialNumber)}
+                      disabled={!d.serialNumber}
                       className="text-xs text-gray-500 hover:text-red-600 hover:underline"
                       title="Reset this device's OTA state to idle"
                     >

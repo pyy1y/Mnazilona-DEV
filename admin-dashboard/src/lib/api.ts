@@ -1,9 +1,12 @@
 import axios from 'axios';
 import Cookies from 'js-cookie';
+import { adminPath } from './adminRoutes';
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000').replace(/\/$/, '');
 const ADMIN_API_BASE = `${API_BASE}/admin`;
 const AUTH_API_BASE = `${API_BASE}/auth`;
+const TOKEN_KEY = 'admin_token';
+const REFRESH_TOKEN_KEY = 'admin_refresh_token';
 
 // NOTE: When you get a domain, update NEXT_PUBLIC_API_URL to use HTTPS:
 // NEXT_PUBLIC_API_URL=https://your-domain.com
@@ -16,9 +19,33 @@ const api = axios.create({
 
 const adminApiUrl = (path: string) => `${ADMIN_API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
 
+const getStoredToken = () =>
+  Cookies.get(TOKEN_KEY) || (typeof window !== 'undefined' ? window.localStorage.getItem(TOKEN_KEY) : null);
+
+const getStoredRefreshToken = () =>
+  Cookies.get(REFRESH_TOKEN_KEY) || (typeof window !== 'undefined' ? window.localStorage.getItem(REFRESH_TOKEN_KEY) : null);
+
+const storeTokens = (token: string, refreshToken: string) => {
+  Cookies.set(TOKEN_KEY, token, { sameSite: 'strict', secure: typeof window !== 'undefined' && window.location.protocol === 'https:', path: '/' });
+  Cookies.set(REFRESH_TOKEN_KEY, refreshToken, { sameSite: 'strict', secure: typeof window !== 'undefined' && window.location.protocol === 'https:', path: '/', expires: 7 });
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(TOKEN_KEY, token);
+    window.localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+  }
+};
+
+const clearStoredTokens = () => {
+  Cookies.remove(TOKEN_KEY);
+  Cookies.remove(REFRESH_TOKEN_KEY);
+  if (typeof window !== 'undefined') {
+    window.localStorage.removeItem(TOKEN_KEY);
+    window.localStorage.removeItem(REFRESH_TOKEN_KEY);
+  }
+};
+
 // Attach token to every request
 api.interceptors.request.use((config) => {
-  const token = Cookies.get('admin_token');
+  const token = getStoredToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
@@ -48,11 +75,11 @@ api.interceptors.response.use(
         return Promise.reject(error);
       }
 
-      const refreshToken = Cookies.get('admin_refresh_token');
+      const refreshToken = getStoredRefreshToken();
       if (!refreshToken) {
-        Cookies.remove('admin_token');
-        if (typeof window !== 'undefined' && !window.location.pathname.includes('/admin/login')) {
-          window.location.href = '/admin/login';
+        clearStoredTokens();
+        if (typeof window !== 'undefined' && !window.location.pathname.endsWith('/login')) {
+          window.location.href = adminPath('/login', window.location.pathname);
         }
         return Promise.reject(error);
       }
@@ -71,17 +98,15 @@ api.interceptors.response.use(
 
       try {
         const { data } = await axios.post(`${AUTH_API_BASE}/refresh-token`, { refreshToken });
-        Cookies.set('admin_token', data.token, { sameSite: 'strict', secure: typeof window !== 'undefined' && window.location.protocol === 'https:', path: '/' });
-        Cookies.set('admin_refresh_token', data.refreshToken, { sameSite: 'strict', secure: typeof window !== 'undefined' && window.location.protocol === 'https:', path: '/', expires: 7 });
+        storeTokens(data.token, data.refreshToken);
         processQueue(null, data.token);
         originalRequest.headers.Authorization = `Bearer ${data.token}`;
         return api(originalRequest);
       } catch (refreshError) {
         processQueue(refreshError, null);
-        Cookies.remove('admin_token');
-        Cookies.remove('admin_refresh_token');
-        if (typeof window !== 'undefined' && !window.location.pathname.includes('/admin/login')) {
-          window.location.href = '/admin/login';
+        clearStoredTokens();
+        if (typeof window !== 'undefined' && !window.location.pathname.endsWith('/login')) {
+          window.location.href = adminPath('/login', window.location.pathname);
         }
         return Promise.reject(refreshError);
       } finally {
