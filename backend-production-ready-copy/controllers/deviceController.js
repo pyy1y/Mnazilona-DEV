@@ -7,7 +7,7 @@ const DeviceLog = require('../models/DeviceLog');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
 const Firmware = require('../models/Firmware');
-const { topicOf, publishMessage, MQTT_BROKER_HOST, invalidateDeviceMeta } = require('../config/mqtt');
+const { topicOf, publishMessage, MQTT_PUBLIC_HOST, MQTT_PUBLIC_PORT, invalidateDeviceMeta } = require('../config/mqtt');
 const { emitToUser, emitToAdminDevicesView } = require('../config/socket');
 const { canUserAccessDevice, getDeviceACL } = require('../services/mqttAclService');
 const { trackDeviceCommand, trackPairAttempt } = require('../services/anomalyDetector');
@@ -19,20 +19,6 @@ const {
 } = require('../services/idempotencyService');
 
 const ALLOWED_COMMANDS = ['open', 'on', 'off', 'toggle', 'status', 'restart', 'config'];
-
-function parseBrokerUrl(url) {
-  if (!url) return { host: '', port: 1883 };
-
-  let cleaned = url.trim();
-  cleaned = cleaned.replace(/^(mqtt|mqtts|tcp|ssl|ws|wss):\/\//i, '');
-  cleaned = cleaned.replace(/\/+$/, '');
-
-  const parts = cleaned.split(':');
-  const host = parts[0];
-  const port = parts[1] ? parseInt(parts[1], 10) : 1883;
-
-  return { host, port: isNaN(port) ? 1883 : port };
-}
 
 const sanitizeDeviceResponse = (device) => ({
   id: device._id,
@@ -105,7 +91,7 @@ exports.inquiry = async (req, res) => {
       device.macAddress = macAddress.trim().toUpperCase();
     }
 
-    const broker = parseBrokerUrl(MQTT_BROKER_HOST);
+    const broker = { host: MQTT_PUBLIC_HOST, port: MQTT_PUBLIC_PORT };
 
     device.mqttUsername = allowedDevice.mqttUsername;
     device.mqttPassword = allowedDevice.mqttPassword;

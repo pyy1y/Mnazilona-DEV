@@ -2,7 +2,7 @@
 // ======================================
 // API Configuration
 // ======================================
-const DEFAULT_DEV_API_URL = 'http://172.20.10.2:3000';
+const DEFAULT_DEV_API_URL = 'https://mnazilona.xyz/api';
 const DEFAULT_PROD_API_URL = 'https://mnazilona.xyz/api';
 const isDev = __DEV__;
 
