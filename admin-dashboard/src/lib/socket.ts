@@ -220,26 +220,30 @@ function subscribeRoom(payload: AdminSubscription): () => void {
 // Hook: subscribe to admin namespace events. Multiple components share the
 // singleton socket; cleanup only removes this hook's listeners.
 export function useSocket() {
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState(() => socketInstance?.connected ?? false);
   const socketRef = useRef<TypedSocket | null>(null);
 
   useEffect(() => {
     const socket = getSocket();
     socketRef.current = socket;
-    setConnected(socket.connected);
+    const syncConnected = () => setConnected(socket.connected);
 
-    const onConnect = () => setConnected(true);
+    syncConnected();
+
+    const onConnect = syncConnected;
     const onDisconnect = () => setConnected(false);
-    const onConnectError = () => setConnected(false);
+    const onConnectError = syncConnected;
 
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('connect_error', onConnectError);
+    const syncInterval = window.setInterval(syncConnected, 1000);
 
     return () => {
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
       socket.off('connect_error', onConnectError);
+      window.clearInterval(syncInterval);
     };
   }, []);
 
