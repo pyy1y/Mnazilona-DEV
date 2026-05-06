@@ -1,22 +1,19 @@
-// app/pairing.tsx
+// app/pairing-ap.tsx
 // ═══════════════════════════════════════════════════════════════
-// BLE Provisioning — no PoP code
+// Wi-Fi AP Provisioning — counterpart to pairing.tsx (BLE).
 //
-// Flow:
-//   1. Scan for nearby Mnazilona BLE devices
-//   2. Select and connect to device  → device hands the deviceSecret
-//      back over the BLE link (no user-entered code required)
-//   3. Device scans WiFi networks → app shows sorted list (2.4GHz)
-//   4. User selects network and enters password
-//   5. Credentials sent to device over BLE
-//   6. Device connects to WiFi, does server inquiry
-//   7. App pairs with backend server (deviceSecret + auth token)
-//
-// المكتبة المطلوبة:
-//   npx expo install react-native-ble-plx
+// Flow (auto-join via react-native-wifi-reborn):
+//   1. On mount: scan nearby Wi-Fi for "MNZ_*" (Android) or show a
+//      single "Join" button (iOS).
+//   2. User taps Join. App calls connectToProtectedSSID — OS shows
+//      its native prompt and the phone joins the device AP.
+//   3. App fetches /info, /scan over http://192.168.4.1.
+//   4. User picks home Wi-Fi + types password, app POSTs /config.
+//   5. App auto-drops the AP. Phone rejoins the home Wi-Fi.
+//   6. App pairs with the backend (same /devices/pair flow as BLE).
 // ═══════════════════════════════════════════════════════════════
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput, Alert,
   ActivityIndicator, KeyboardAvoidingView, ScrollView, Platform,
@@ -27,153 +24,210 @@ import { TokenManager } from "../utils/api";
 import { createRequestId } from "../utils/requestId";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import {
-  useBLEProvisioning,
-  DiscoveredDevice,
-  WiFiNetwork,
-} from "../hooks/useBLEProvisioning";
+  useAPProvisioning,
+  APWiFiNetwork,
+  DiscoveredAP,
+} from "../hooks/useAPProvisioning";
 
 const BRAND = "#2E5B8E";
 
-// ═══════════════════════════════════════
-// Types
-// ═══════════════════════════════════════
-type PairingStep =
-  | "select_mode"     // Choose pairing transport: Bluetooth or Wi-Fi AP
-  | "scan_devices"    // BLE scanning for nearby devices
-  | "connecting_ble"  // Connecting to selected BLE device
-  | "scanning_wifi"   // Device is scanning WiFi networks
-  | "select_wifi"     // User picks a network from the list
-  | "enter_password"  // User enters WiFi password
-  | "provisioning"    // Sending credentials, device connecting
-  | "pairing"         // Linking with backend
+// Default AP password baked into the firmware (#define AP_PASSWORD).
+// Empty string = open AP.
+const AP_DEFAULT_PASSWORD = "mnazilona1234";
+
+type APStep =
+  | "scan_aps"         // Looking for nearby MNZ_* devices (Android)
+  | "select_ap"        // User picks a discovered MNZ_* (Android) or hits Join (iOS)
+  | "joining"          // OS join prompt visible / connect call in flight
+  | "confirm_joined"   // User taps "I'm Connected" — then we verify
+  | "verifying"        // Pinging /health to confirm reachability
+  | "fetching_info"    // GET /info
+  | "scanning_wifi"    // GET /scan (home networks visible to device)
+  | "select_wifi"      // User picks home Wi-Fi
+  | "enter_password"   // User types home Wi-Fi password
+  | "provisioning"     // POST /config + auto-leave AP
+  | "pairing"          // Backend /devices/pair
   | "done"
   | "error";
 
-// ═══════════════════════════════════════
-// Component
-// ═══════════════════════════════════════
-export default function PairingScreen() {
+export default function PairingAPScreen() {
   const router = useRouter();
-  const ble = useBLEProvisioning();
+  const ap = useAPProvisioning();
 
-  const [step, setStep] = useState<PairingStep>("select_mode");
-  const [selectedWifi, setSelectedWifi] = useState<WiFiNetwork | null>(null);
+  const [step, setStep] = useState<APStep>("scan_aps");
+  const [selectedWifi, setSelectedWifi] = useState<APWiFiNetwork | null>(null);
+  const [selectedApSsid, setSelectedApSsid] = useState<string | null>(null);
   const [password, setPassword] = useState("");
-  const [wifiNetworks, setWifiNetworks] = useState<WiFiNetwork[]>([]);
+  const [wifiNetworks, setWifiNetworks] = useState<APWiFiNetwork[]>([]);
   const [loading, setLoading] = useState(false);
   const [statusText, setStatusText] = useState("");
   const [errorText, setErrorText] = useState("");
 
-  // Refs for async chain safety
   const serialNumberRef = useRef("");
   const deviceSecretRef = useRef("");
   const pairRequestIdRef = useRef("");
-  const scanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Carries the OS-level join error across to confirmJoinedAndContinue,
+  // so that if verify also fails we surface the actual root cause
+  // (e.g. "Wrong AP password", "Join was cancelled") instead of a
+  // generic "couldn't reach the device" message.
+  const fallbackJoinErrorRef = useRef<string | null>(null);
 
-  const setSerialNumberSynced = (value: string) => {
-    serialNumberRef.current = value;
-  };
-  const setDeviceSecretSynced = (value: string) => {
-    deviceSecretRef.current = value;
-  };
-
-  // Cleanup BLE on unmount
+  // Kick off the AP scan as soon as the screen opens.
   useEffect(() => {
-    const disconnectBle = ble.disconnect;
+    runApScan();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Cleanup: if the screen unmounts mid-flow, drop the AP so the
+  // phone goes back to home Wi-Fi.
+  useEffect(() => {
+    const leave = ap.leaveAP;
     return () => {
-      if (scanTimeoutRef.current) {
-        clearTimeout(scanTimeoutRef.current);
-      }
-      void disconnectBle();
+      leave();
     };
-  }, [ble.disconnect]);
+  }, [ap.leaveAP]);
 
   // ═══════════════════════════════════════
-  // Step 1: Scan for BLE Devices
+  // Step 1: Scan for nearby device APs
   // ═══════════════════════════════════════
-  const startBLEScan = async () => {
-    pairRequestIdRef.current = "";
-    setStep("scan_devices");
+  const runApScan = async () => {
+    setStep("scan_aps");
     setLoading(true);
-    setStatusText("Scanning for nearby devices...");
     setErrorText("");
+    setStatusText("Looking for nearby devices...");
 
-    await ble.startScan(12000); // 12 seconds
-
-    // Scanning runs in background via the hook — devices appear reactively
-    // After scan duration, loading stops
-    if (scanTimeoutRef.current) {
-      clearTimeout(scanTimeoutRef.current);
-    }
-    scanTimeoutRef.current = setTimeout(() => {
+    if (Platform.OS !== "android") {
+      // iOS can't scan. Skip straight to the manual join UI.
       setLoading(false);
-      setStatusText("");
-      scanTimeoutRef.current = null;
-    }, 12500);
-  };
-
-  // ═══════════════════════════════════════
-  // Step 1b: Connect to Selected Device
-  // ═══════════════════════════════════════
-  const connectToDevice = async (device: DiscoveredDevice) => {
-    ble.stopScan();
-    pairRequestIdRef.current = "";
-    setStep("connecting_ble");
-    setLoading(true);
-    setStatusText(`Connecting to ${device.name}...`);
-
-    const info = await ble.connectToDevice(device.id);
-
-    if (!info) {
-      setLoading(false);
-      setErrorText(ble.error || "Failed to connect to device.");
-      setStep("error");
+      setStep("select_ap");
       return;
     }
 
-    setSerialNumberSynced(info.serial);
-
-    // Pull the deviceSecret from the BLE compatibility characteristic.
-    // PoP is gone, but the firmware still answers a write to the legacy
-    // verify characteristic with {status:"ok", deviceSecret:"..."}.
-    try {
-      const result = await ble.fetchDeviceSecret();
-      const secret =
-        result.data?.deviceSecret || result.data?.device_secret || result.data?.secret;
-      if (secret) {
-        setDeviceSecretSynced(secret);
-      } else if (__DEV__) {
-        console.warn("[Pairing] Device did not return a secret over BLE");
-      }
-    } catch (e: any) {
-      if (__DEV__) console.warn("[Pairing] fetchDeviceSecret failed:", e?.message);
-    }
-
+    const aps = await ap.scanForDeviceAPs();
     setLoading(false);
-    startWiFiScan();
+    if (aps.length === 0) {
+      // No devices found, but allow the user to retry or fall back
+      // to manual entry if they know the SSID.
+      setStep("select_ap");
+      return;
+    }
+    setStep("select_ap");
   };
 
   // ═══════════════════════════════════════
-  // Step 2: Request WiFi Scan from Device
+  // Step 2a: User taps Join on a device.
+  // Triggers the OS Wi-Fi join, then auto-advances straight into
+  // verify → /info → /scan so the user lands on the Wi-Fi credentials
+  // screen as soon as the AP is reachable. If the verify step can't
+  // hit /health within its retry budget, we fall back to the
+  // "I'm Connected" recovery screen so the user can retry without
+  // restarting the whole flow.
   // ═══════════════════════════════════════
-  const startWiFiScan = async () => {
+  const triggerApJoin = async (apSsid: string | null) => {
+    setSelectedApSsid(apSsid);
+    setStep("joining");
+    setLoading(true);
+    setErrorText("");
+    setStatusText(
+      apSsid
+        ? `Asking the system to join ${apSsid}...`
+        : "Asking the system to join the device Wi-Fi..."
+    );
+
+    const ok = await ap.triggerJoin(apSsid, AP_DEFAULT_PASSWORD);
+
+    // Android (especially API 29+ with WifiNetworkSpecifier) sometimes
+    // resolves connectToProtectedSSID as failure WHILE the system is
+    // still finishing the network handover. Don't trust the false
+    // negative — wait for the OS to settle, then let
+    // confirmJoinedAndContinue's verify+ping retry budget decide.
+    // If verify also fails, we surface the original join error so the
+    // user sees the real cause (cancelled, wrong AP password, etc.).
+    if (!ok) {
+      const joinErr = ap.error;
+      if (__DEV__) console.log("[Pairing AP] triggerJoin returned false:", joinErr, "— waiting before declaring failure");
+      setStatusText("Finishing connection to the device...");
+      // Give Android time to actually finish binding the AP before we probe.
+      await new Promise((r) => setTimeout(r, 3000));
+      fallbackJoinErrorRef.current = joinErr;
+    } else {
+      fallbackJoinErrorRef.current = null;
+      if (__DEV__) console.log("[Pairing AP] triggerJoin OK, auto-advancing to verify + fetch info");
+    }
+
+    // Single path for both success and "false negative" — verify
+    // reachability, fetch /info, then move on to the credentials screen.
+    await confirmJoinedAndContinue();
+  };
+
+  // ═══════════════════════════════════════
+  // Step 2b: User taps "I'm Connected".
+  // Verifies the AP is actually reachable, then fetches /info and
+  // moves on to home Wi-Fi selection.
+  // ═══════════════════════════════════════
+  const confirmJoinedAndContinue = async () => {
+    setStep("verifying");
+    setLoading(true);
+    setErrorText("");
+    setStatusText("Checking connection to the device...");
+
+    const reachable = await ap.verifyConnection();
+    if (__DEV__) console.log("[Pairing AP] verifyConnection →", reachable);
+    if (!reachable) {
+      setLoading(false);
+      // If we got here after a falsy triggerJoin, the original OS error
+      // is more useful than the generic "couldn't reach" message.
+      const joinErr = fallbackJoinErrorRef.current;
+      fallbackJoinErrorRef.current = null;
+      setErrorText(
+        joinErr ||
+          ap.error ||
+          "Couldn't reach the device. Make sure your phone shows you're connected to MNZ_… and try again."
+      );
+      // Send the user back to the AP picker if the join itself failed —
+      // they need to retry the join, not just confirm reachability.
+      setStep(joinErr ? "select_ap" : "confirm_joined");
+      return;
+    }
+    fallbackJoinErrorRef.current = null;
+
+    setStep("fetching_info");
+    setStatusText("Reading device information...");
+
+    const info = await ap.fetchDeviceInfo();
+    if (__DEV__) console.log("[Pairing AP] /info →", info ? { serial: info.serial, hasSecret: !!info.deviceSecret } : null);
+    if (!info) {
+      setLoading(false);
+      setErrorText(ap.error || "Failed to read device info.");
+      setStep("error");
+      return;
+    }
+    serialNumberRef.current = info.serial;
+    deviceSecretRef.current = info.deviceSecret || "";
+
+    await runWifiScan();
+  };
+
+  // ═══════════════════════════════════════
+  // Step 3: Scan home Wi-Fi via device
+  // ═══════════════════════════════════════
+  const runWifiScan = async () => {
     setStep("scanning_wifi");
     setLoading(true);
-    setStatusText("Device is scanning for WiFi networks...");
+    setStatusText("Device is scanning for Wi-Fi networks...");
 
     try {
-      const networks = await ble.requestWiFiScan();
+      const networks = await ap.fetchWiFiNetworks();
       setWifiNetworks(networks);
       setLoading(false);
       setStep("select_wifi");
-    } catch (e: any) {
+    } catch {
       setLoading(false);
-      if (__DEV__) console.log("[Pairing] WiFi scan failed:", e.message);
       Alert.alert(
         "Scan Failed",
-        "Could not get WiFi networks from device. Try again.",
+        "Could not get Wi-Fi networks from the device. Try again.",
         [
-          { text: "Retry", onPress: () => startWiFiScan() },
+          { text: "Retry", onPress: () => runWifiScan() },
           { text: "Cancel", style: "cancel", onPress: () => setStep("error") },
         ]
       );
@@ -181,60 +235,49 @@ export default function PairingScreen() {
   };
 
   // ═══════════════════════════════════════
-  // Step 4: User Selects WiFi Network
+  // Step 4: User picks a home Wi-Fi
   // ═══════════════════════════════════════
-  const selectWifi = (network: WiFiNetwork) => {
+  const selectWifi = (network: APWiFiNetwork) => {
     setSelectedWifi(network);
-    if (network.secure) {
-      setStep("enter_password");
-    } else {
-      // Open network — send directly
-      sendWifiCredentials(network.ssid, "");
-    }
+    if (network.secure) setStep("enter_password");
+    else sendCredentials(network.ssid, "");
   };
 
   // ═══════════════════════════════════════
-  // Step 5: Send WiFi Credentials
+  // Step 5: Send /config + auto-leave AP + pair
   // ═══════════════════════════════════════
-  const sendWifiCredentials = async (ssid: string, pass: string) => {
+  const sendCredentials = async (ssid: string, pass: string) => {
     setStep("provisioning");
     setLoading(true);
-    setStatusText("Sending WiFi settings to device...");
+    setStatusText("Sending Wi-Fi settings to the device...");
 
-    const { success, data } = await ble.sendWiFiConfig(ssid, pass);
+    if (__DEV__) console.log("[Pairing AP] POST /config → ssid:", ssid);
+    const { success, data } = await ap.sendWiFiConfig(ssid, pass);
+    if (__DEV__) console.log("[Pairing AP] /config response → success:", success, "data:", data);
 
-    if (success) {
-      if (__DEV__) console.log("[Pairing] WiFi config sent — device connected!");
-      // Device will stop BLE, connect to WiFi, do server inquiry
-      await ble.disconnect();
-
-      setStatusText("Waiting for device to register...");
-      // ESP32-C6 shares radio between BLE and WiFi — after responding "ok",
-      // it still needs to: delay(1000) + stopBLE/deinit + inquireServer (HTTP).
-      // The NimBLE deinit can take 3-5s on C6, then the HTTP inquiry ~2-5s.
-      // 12s initial wait gives the device enough time to complete server inquiry.
-      await new Promise(resolve => setTimeout(resolve, 12000));
-
-      pairRequestIdRef.current = createRequestId("pair");
-      await pairWithServer(0);
-    } else if (data.status === "wifi_error") {
+    if (!success) {
       setLoading(false);
       Alert.alert(
-        "WiFi Connection Failed",
-        data.message || "Could not connect to WiFi. Check your password.",
+        "Setup Failed",
+        data?.message || "The device rejected the Wi-Fi credentials. Try again.",
         [{ text: "OK" }]
       );
       setStep("enter_password");
-    } else {
-      setLoading(false);
-      setErrorText(data.message || "Failed to configure WiFi.");
-      setStep("error");
+      return;
     }
+
+    if (data?.deviceSecret) deviceSecretRef.current = data.deviceSecret;
+    if (data?.serial) serialNumberRef.current = data.serial;
+
+    // The hook has already auto-left the AP and waited for the phone
+    // to rejoin home Wi-Fi. Move straight into the backend pair.
+    setStatusText("Linking device to your account...");
+    pairRequestIdRef.current = createRequestId("pair");
+    await pairWithServer(0);
   };
 
   // ═══════════════════════════════════════
-  // Step 6: Pair with Backend Server
-  // (Unchanged from AP version — same backend flow)
+  // Backend pair (identical to BLE flow)
   // ═══════════════════════════════════════
   const pairWithServer = async (attempt: number) => {
     const MAX_ATTEMPTS = 10;
@@ -250,7 +293,6 @@ export default function PairingScreen() {
       const requestId = pairRequestIdRef.current;
 
       if (!sn) {
-        if (__DEV__) console.error("[Pairing] No serial number in ref!");
         pairRequestIdRef.current = "";
         setStep("error");
         setErrorText("No serial number found. Please restart the setup.");
@@ -260,7 +302,6 @@ export default function PairingScreen() {
 
       const token = await TokenManager.get();
       if (!token) {
-        if (__DEV__) console.error("[Pairing] No auth token found!");
         pairRequestIdRef.current = "";
         setStep("error");
         setErrorText("Session expired. Please log in again and retry.");
@@ -268,11 +309,7 @@ export default function PairingScreen() {
         return;
       }
 
-      if (!secret) {
-        if (__DEV__) console.warn("[Pairing] No deviceSecret available! Pair will likely fail with 400.");
-      }
-
-      if (__DEV__) console.log(`[Pairing] Attempt ${attempt + 1}/${MAX_ATTEMPTS} | SN: ${sn} | secret: ${secret ? "present" : "MISSING"}`);
+      if (__DEV__) console.log(`[Pairing AP] Attempt ${attempt + 1}/${MAX_ATTEMPTS} | SN: ${sn} | secret: ${secret ? "present" : "MISSING"}`);
 
       const pairController = new AbortController();
       const pairTimeout = setTimeout(() => pairController.abort(), 15000);
@@ -292,7 +329,6 @@ export default function PairingScreen() {
       clearTimeout(pairTimeout);
 
       const data = await res.json().catch(() => ({}));
-      if (__DEV__) console.log(`[Pairing] Response: ${res.status}`, JSON.stringify(data));
 
       if (res.ok) {
         await waitForDeviceOnline(sn, token);
@@ -316,12 +352,9 @@ export default function PairingScreen() {
         return;
       }
 
-      if (res.status === 404) {
-        throw new Error("Device not ready yet");
-      }
+      if (res.status === 404) throw new Error("Device not ready yet");
 
       if (res.status === 400) {
-        if (__DEV__) console.error("[Pairing] Bad request:", data.message);
         pairRequestIdRef.current = "";
         setStep("error");
         setLoading(false);
@@ -330,7 +363,6 @@ export default function PairingScreen() {
       }
 
       if (res.status === 401) {
-        if (__DEV__) console.error("[Pairing] Auth failed:", data.code || data.error);
         pairRequestIdRef.current = "";
         setStep("error");
         setLoading(false);
@@ -339,7 +371,6 @@ export default function PairingScreen() {
       }
 
       if (res.status === 403) {
-        if (__DEV__) console.error("[Pairing] Forbidden:", data.message);
         pairRequestIdRef.current = "";
         setStep("error");
         setLoading(false);
@@ -348,9 +379,8 @@ export default function PairingScreen() {
       }
 
       throw new Error(data.message || "Pairing failed");
-
     } catch (e: any) {
-      if (__DEV__) console.log(`[Pairing] Attempt ${attempt + 1} failed:`, e.message);
+      if (__DEV__) console.log(`[Pairing AP] Attempt ${attempt + 1} failed:`, e.message);
 
       if (attempt < MAX_ATTEMPTS - 1) {
         const delay = Math.min(3000 * Math.pow(1.5, attempt), 15000);
@@ -367,9 +397,6 @@ export default function PairingScreen() {
     }
   };
 
-  // ═══════════════════════════════════════
-  // Wait for device to come online
-  // ═══════════════════════════════════════
   const waitForDeviceOnline = async (sn: string, token: string) => {
     setStatusText("Waiting for device to come online...");
 
@@ -388,7 +415,7 @@ export default function PairingScreen() {
         clearTimeout(pollTimeout);
         if (res.ok) {
           const device = await res.json().catch(() => null);
-          if (device.isOnline) {
+          if (device?.isOnline) {
             pairRequestIdRef.current = "";
             setStep("done");
             setLoading(false);
@@ -397,9 +424,9 @@ export default function PairingScreen() {
           }
         }
       } catch {
-        // Ignore and retry
+        // ignore and retry
       }
-      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
     }
 
     pairRequestIdRef.current = "";
@@ -409,7 +436,7 @@ export default function PairingScreen() {
   };
 
   // ═══════════════════════════════════════
-  // Helper: signal strength icon
+  // Helpers
   // ═══════════════════════════════════════
   const wifiSignalIcon = (rssi: number): string => {
     if (rssi > -50) return "wifi-strength-4";
@@ -417,12 +444,6 @@ export default function PairingScreen() {
     if (rssi > -70) return "wifi-strength-2";
     if (rssi > -80) return "wifi-strength-1";
     return "wifi-strength-outline";
-  };
-
-  const bleSignalIcon = (rssi: number): string => {
-    if (rssi > -50) return "bluetooth-connect";
-    if (rssi > -70) return "bluetooth";
-    return "bluetooth-off";
   };
 
   // ═══════════════════════════════════════
@@ -434,154 +455,186 @@ export default function PairingScreen() {
 
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => { ble.disconnect(); router.back(); }}>
+          <TouchableOpacity onPress={() => { ap.leaveAP(); router.back(); }}>
             <MaterialCommunityIcons name="arrow-left" size={28} color={BRAND} />
           </TouchableOpacity>
-          <Text style={styles.title}>Add Device</Text>
+          <Text style={styles.title}>Add Device (Wi-Fi)</Text>
         </View>
 
-        {/* Step Indicator (hidden on the mode-chooser) */}
-        {step !== "select_mode" && (
-          <View style={styles.steps}>
-            {["Scan", "WiFi", "Done"].map((label, i) => {
-              const stepIndex =
-                ["scan_devices", "connecting_ble"].includes(step) ? 0
-                : ["scanning_wifi", "select_wifi", "enter_password", "provisioning"].includes(step) ? 1
-                : 2;
-              const isActive = i <= stepIndex;
-              return (
-                <View key={label} style={styles.stepRow}>
-                  <View style={[styles.stepDot, isActive && styles.stepDotActive]} />
-                  <Text style={[styles.stepLabel, isActive && styles.stepLabelActive]}>{label}</Text>
-                  {i < 2 && <View style={[styles.stepLine, isActive && styles.stepLineActive]} />}
-                </View>
-              );
-            })}
+        {/* Step Indicator */}
+        <View style={styles.steps}>
+          {["Join", "Configure", "Done"].map((label, i) => {
+            const stepIndex =
+              ["scan_aps", "select_ap", "joining", "confirm_joined", "verifying", "fetching_info"].includes(step) ? 0
+              : ["scanning_wifi", "select_wifi", "enter_password", "provisioning"].includes(step) ? 1
+              : 2;
+            const isActive = i <= stepIndex;
+            return (
+              <View key={label} style={styles.stepRow}>
+                <View style={[styles.stepDot, isActive && styles.stepDotActive]} />
+                <Text style={[styles.stepLabel, isActive && styles.stepLabelActive]}>{label}</Text>
+                {i < 2 && <View style={[styles.stepLine, isActive && styles.stepLineActive]} />}
+              </View>
+            );
+          })}
+        </View>
+
+        {/* ──── SCANNING NEARBY APS ──── */}
+        {step === "scan_aps" && (
+          <View style={styles.center}>
+            <ActivityIndicator size="large" color={BRAND} />
+            <Text style={[styles.h2, { marginTop: 20 }]}>Looking for Devices…</Text>
+            <Text style={styles.statusText}>{statusText}</Text>
           </View>
         )}
 
-        {/* ──── STEP 0: SELECT PAIRING MODE (BLE vs Wi-Fi AP) ──── */}
-        {step === "select_mode" && (
+        {/* ──── PICK / JOIN AN AP ──── */}
+        {step === "select_ap" && (
           <View>
             <View style={styles.center}>
-              <MaterialCommunityIcons name="cellphone-link" size={70} color={BRAND} />
+              <MaterialCommunityIcons name="access-point-network" size={70} color={BRAND} />
             </View>
-            <Text style={styles.h2}>How is your device set up?</Text>
+            <Text style={styles.h2}>Connect to Your Device</Text>
             <Text style={styles.p}>
-              Choose how the app should talk to your new device while pairing. Most Mnazilona devices support Bluetooth pairing; some firmware variants use a Wi-Fi access point instead.
+              {Platform.OS === "android"
+                ? "Tap your device below. The system will ask you to allow the connection."
+                : "Tap Join below. iOS will ask you to confirm joining the device's Wi-Fi network."}
             </Text>
 
-            <TouchableOpacity
-              style={styles.modeCard}
-              onPress={() => setStep("scan_devices")}
-            >
-              <MaterialCommunityIcons name="bluetooth" size={32} color={BRAND} style={{ marginRight: 16 }} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.modeTitle}>Bluetooth</Text>
-                <Text style={styles.modeSub}>
-                  Recommended. Device LED blinks blue.
-                </Text>
-              </View>
-              <MaterialCommunityIcons name="chevron-right" size={24} color="#999" />
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.modeCard}
-              onPress={() => router.replace("/pairing-ap" as any)}
-            >
-              <MaterialCommunityIcons name="access-point-network" size={32} color={BRAND} style={{ marginRight: 16 }} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.modeTitle}>Wi-Fi (Access Point)</Text>
-                <Text style={styles.modeSub}>
-                  Device broadcasts an &quot;MNZ_…&quot; Wi-Fi network.
-                </Text>
-              </View>
-              <MaterialCommunityIcons name="chevron-right" size={24} color="#999" />
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {/* ──── STEP 1: SCAN BLE DEVICES ──── */}
-        {step === "scan_devices" && (
-          <View>
-            <View style={styles.center}>
-              <MaterialCommunityIcons name="bluetooth-connect" size={70} color={BRAND} />
-            </View>
-            <Text style={styles.h2}>Find Your Device</Text>
-            <Text style={styles.p}>
-              Make sure your device is powered on and the LED is blinking blue, then tap the button below to search.
-            </Text>
-
-            <TouchableOpacity
-              style={[styles.btnMain, loading && styles.btnDisabled]}
-              onPress={startBLEScan}
-              disabled={loading}
-            >
-              {loading ? (
-                <>
-                  <ActivityIndicator color="#fff" style={{ marginRight: 8 }} />
-                  <Text style={styles.btnTxt}>Scanning...</Text>
-                </>
-              ) : (
-                <>
-                  <MaterialCommunityIcons name="bluetooth-audio" size={20} color="#fff" style={{ marginRight: 8 }} />
-                  <Text style={styles.btnTxt}>Scan for Devices</Text>
-                </>
-              )}
-            </TouchableOpacity>
-
-            {/* Device List */}
-            {ble.discoveredDevices.length > 0 && (
-              <View style={{ marginTop: 20 }}>
-                <Text style={styles.label}>Nearby Devices</Text>
-                {ble.discoveredDevices.map((device) => (
+            {Platform.OS === "android" && ap.discoveredAPs.length > 0 && (
+              <View>
+                {ap.discoveredAPs.map((d: DiscoveredAP) => (
                   <TouchableOpacity
-                    key={device.id}
+                    key={d.ssid}
                     style={styles.deviceCard}
-                    onPress={() => connectToDevice(device)}
+                    onPress={() => triggerApJoin(d.ssid)}
                   >
                     <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
                       <MaterialCommunityIcons
-                        name={bleSignalIcon(device.rssi) as any}
+                        name={wifiSignalIcon(d.level) as any}
                         size={24}
                         color={BRAND}
                         style={{ marginRight: 12 }}
                       />
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.deviceName}>{device.serialNumber}</Text>
-                        <Text style={styles.deviceSub}>Signal: {device.rssi} dBm</Text>
+                        <Text style={styles.deviceName}>{d.ssid}</Text>
+                        <Text style={styles.deviceSub}>Signal: {d.level} dBm</Text>
                       </View>
-                      <MaterialCommunityIcons name="chevron-right" size={24} color="#999" />
+                      <View style={styles.joinPill}>
+                        <Text style={styles.joinPillTxt}>Join</Text>
+                      </View>
                     </View>
                   </TouchableOpacity>
                 ))}
               </View>
             )}
 
-            {!loading && ble.discoveredDevices.length === 0 && ble.bleState === "idle" && (
-              <Text style={[styles.p, { marginTop: 20 }]}>
-                No devices found yet. Make sure your device is nearby and in pairing mode.
-              </Text>
+            {Platform.OS === "android" && ap.discoveredAPs.length === 0 && (
+              <View style={[styles.infoBox, { backgroundColor: "#FFF7E6", borderColor: "#FFE2A8" }]}>
+                <Text style={styles.infoText}>
+                  No nearby devices found. Make sure the device is powered on and the LED is blinking blue, then tap Scan Again.
+                </Text>
+              </View>
             )}
 
-            {ble.error && (
+            {Platform.OS === "ios" && (
+              <TouchableOpacity
+                style={styles.btnMain}
+                onPress={() => triggerApJoin(null)}
+              >
+                <MaterialCommunityIcons name="wifi" size={20} color="#fff" style={{ marginRight: 8 }} />
+                <Text style={styles.btnTxt}>Join Device Wi-Fi</Text>
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity style={styles.btnOutline} onPress={runApScan}>
+              <MaterialCommunityIcons name="refresh" size={18} color={BRAND} style={{ marginRight: 8 }} />
+              <Text style={styles.btnTxtBrand}>Scan Again</Text>
+            </TouchableOpacity>
+
+            {errorText.length > 0 && (
               <View style={[styles.infoBox, { backgroundColor: "#FFF3F0", borderColor: "#FFD0C7" }]}>
-                <Text style={[styles.infoText, { color: "#D32F2F" }]}>{ble.error}</Text>
+                <Text style={[styles.infoText, { color: "#D32F2F" }]}>{errorText}</Text>
               </View>
             )}
           </View>
         )}
 
-        {/* ──── CONNECTING BLE ──── */}
-        {step === "connecting_ble" && (
+        {/* ──── JOINING (system prompt in flight) ──── */}
+        {step === "joining" && (
           <View style={styles.center}>
             <ActivityIndicator size="large" color={BRAND} />
             <Text style={[styles.h2, { marginTop: 20 }]}>Connecting to Device</Text>
             <Text style={styles.statusText}>{statusText}</Text>
+            <Text style={[styles.statusText, { marginTop: 12, fontSize: 13, color: "#999" }]}>
+              You may see a system prompt — tap Join / Allow.
+            </Text>
           </View>
         )}
 
-        {/* ──── SCANNING WIFI ──── */}
+        {/* ──── CONFIRM JOINED — recovery state when verify fails ──── */}
+        {step === "confirm_joined" && (
+          <View>
+            <View style={styles.center}>
+              <MaterialCommunityIcons name="wifi-alert" size={70} color={BRAND} />
+            </View>
+            <Text style={styles.h2}>Couldn&apos;t Reach the Device</Text>
+            <Text style={styles.p}>
+              {selectedApSsid
+                ? `Open your phone's Wi-Fi settings and make sure you're connected to "${selectedApSsid}". When you're back here, tap Retry below.`
+                : "Open your phone's Wi-Fi settings and make sure you're connected to the MNZ_… network. When you're back here, tap Retry below."}
+            </Text>
+
+            <TouchableOpacity
+              style={styles.btnMain}
+              onPress={confirmJoinedAndContinue}
+            >
+              <MaterialCommunityIcons name="refresh" size={20} color="#fff" style={{ marginRight: 8 }} />
+              <Text style={styles.btnTxt}>Retry</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.btnOutline}
+              onPress={() => triggerApJoin(selectedApSsid)}
+            >
+              <MaterialCommunityIcons name="wifi-refresh" size={18} color={BRAND} style={{ marginRight: 8 }} />
+              <Text style={styles.btnTxtBrand}>Try Joining Again</Text>
+            </TouchableOpacity>
+
+            {errorText.length > 0 && (
+              <View style={[styles.infoBox, { backgroundColor: "#FFF3F0", borderColor: "#FFD0C7", marginTop: 16 }]}>
+                <Text style={[styles.infoText, { color: "#D32F2F" }]}>{errorText}</Text>
+              </View>
+            )}
+
+            <View style={[styles.infoBox, { marginTop: 24 }]}>
+              <Text style={styles.infoTitle}>Tip</Text>
+              <Text style={styles.infoText}>
+                Your phone may show &quot;No internet&quot; on the device Wi-Fi — that&apos;s expected. Stay on it until setup is complete.
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* ──── VERIFYING ──── */}
+        {step === "verifying" && (
+          <View style={styles.center}>
+            <ActivityIndicator size="large" color={BRAND} />
+            <Text style={[styles.h2, { marginTop: 20 }]}>Checking Connection…</Text>
+            <Text style={styles.statusText}>{statusText}</Text>
+          </View>
+        )}
+
+        {/* ──── FETCHING INFO ──── */}
+        {step === "fetching_info" && (
+          <View style={styles.center}>
+            <ActivityIndicator size="large" color={BRAND} />
+            <Text style={[styles.h2, { marginTop: 20 }]}>Reading Device Info</Text>
+            <Text style={styles.statusText}>{statusText}</Text>
+          </View>
+        )}
+
+        {/* ──── SCANNING HOME WIFI ──── */}
         {step === "scanning_wifi" && (
           <View style={styles.center}>
             <ActivityIndicator size="large" color={BRAND} />
@@ -590,21 +643,21 @@ export default function PairingScreen() {
           </View>
         )}
 
-        {/* ──── STEP 3: SELECT WIFI NETWORK ──── */}
+        {/* ──── SELECT HOME WIFI ──── */}
         {step === "select_wifi" && (
           <View>
             <View style={styles.center}>
               <MaterialCommunityIcons name="router-wireless" size={50} color={BRAND} />
             </View>
-            <Text style={styles.h2}>Select WiFi Network</Text>
+            <Text style={styles.h2}>Select Wi-Fi Network</Text>
             <Text style={styles.p}>
-              Choose your home WiFi network. Only 2.4GHz networks are shown.
+              Choose your home Wi-Fi network. Only 2.4GHz networks are shown.
             </Text>
 
             {wifiNetworks.length === 0 ? (
               <View style={styles.center}>
                 <Text style={styles.p}>No networks found.</Text>
-                <TouchableOpacity style={styles.btnOutline} onPress={startWiFiScan}>
+                <TouchableOpacity style={styles.btnOutline} onPress={runWifiScan}>
                   <Text style={styles.btnTxtBrand}>Scan Again</Text>
                 </TouchableOpacity>
               </View>
@@ -636,7 +689,7 @@ export default function PairingScreen() {
                   </TouchableOpacity>
                 ))}
 
-                <TouchableOpacity style={[styles.btnOutline, { marginTop: 16 }]} onPress={startWiFiScan}>
+                <TouchableOpacity style={[styles.btnOutline, { marginTop: 16 }]} onPress={runWifiScan}>
                   <MaterialCommunityIcons name="refresh" size={18} color={BRAND} style={{ marginRight: 8 }} />
                   <Text style={styles.btnTxtBrand}>Scan Again</Text>
                 </TouchableOpacity>
@@ -645,13 +698,13 @@ export default function PairingScreen() {
           </View>
         )}
 
-        {/* ──── STEP 4: ENTER WIFI PASSWORD ──── */}
+        {/* ──── ENTER WIFI PASSWORD ──── */}
         {step === "enter_password" && (
           <View>
             <View style={styles.center}>
               <MaterialCommunityIcons name="wifi-lock" size={50} color={BRAND} />
             </View>
-            <Text style={styles.h2}>Enter WiFi Password</Text>
+            <Text style={styles.h2}>Enter Wi-Fi Password</Text>
             <Text style={styles.p}>
               Enter the password for &quot;{selectedWifi?.ssid}&quot;.
             </Text>
@@ -661,7 +714,7 @@ export default function PairingScreen() {
               style={styles.input}
               value={password}
               onChangeText={setPassword}
-              placeholder="WiFi password"
+              placeholder="Wi-Fi password"
               secureTextEntry
               autoFocus
             />
@@ -669,9 +722,7 @@ export default function PairingScreen() {
             <TouchableOpacity
               style={[styles.btnMain, loading && styles.btnDisabled]}
               onPress={() => {
-                if (selectedWifi) {
-                  sendWifiCredentials(selectedWifi.ssid, password);
-                }
+                if (selectedWifi) sendCredentials(selectedWifi.ssid, password);
               }}
               disabled={loading}
             >
@@ -691,12 +742,15 @@ export default function PairingScreen() {
           </View>
         )}
 
-        {/* ──── PROVISIONING ──── */}
+        {/* ──── PROVISIONING (config + auto-leave) ──── */}
         {step === "provisioning" && (
           <View style={styles.center}>
             <ActivityIndicator size="large" color={BRAND} />
             <Text style={[styles.h2, { marginTop: 20 }]}>Setting Up Device</Text>
             <Text style={styles.statusText}>{statusText}</Text>
+            <Text style={[styles.statusText, { marginTop: 12, fontSize: 13, color: "#999" }]}>
+              Returning your phone to your home Wi-Fi…
+            </Text>
           </View>
         )}
 
@@ -732,17 +786,18 @@ export default function PairingScreen() {
             <Text style={[styles.h2, { marginTop: 16 }]}>Something Went Wrong</Text>
             <Text style={styles.p}>{errorText}</Text>
 
-            <TouchableOpacity style={styles.btnMain} onPress={() => {
-              ble.disconnect();
-              setStep("scan_devices");
-            }}>
+            <TouchableOpacity
+              style={styles.btnMain}
+              onPress={() => {
+                ap.reset();
+                setErrorText("");
+                runApScan();
+              }}
+            >
               <Text style={styles.btnTxt}>Try Again</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.btnOutline} onPress={() => {
-              ble.disconnect();
-              router.back();
-            }}>
+            <TouchableOpacity style={styles.btnOutline} onPress={() => router.back()}>
               <Text style={styles.btnTxtBrand}>Go Back</Text>
             </TouchableOpacity>
           </View>
@@ -754,7 +809,7 @@ export default function PairingScreen() {
 }
 
 // ═══════════════════════════════════════
-// Styles
+// Styles (mirrors pairing.tsx for visual consistency)
 // ═══════════════════════════════════════
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#fff" },
@@ -776,10 +831,8 @@ const styles = StyleSheet.create({
   p: { fontSize: 15, color: "#777", textAlign: "center", marginBottom: 24, lineHeight: 22 },
   statusText: { fontSize: 15, color: "#555", textAlign: "center", marginTop: 8, lineHeight: 22 },
   label: { fontSize: 14, fontWeight: "600", color: "#444", marginBottom: 6 },
-  deviceLabel: { fontSize: 13, color: "#888", marginTop: 8, marginBottom: 12 },
 
   input: { backgroundColor: "#F5F7FA", padding: 15, borderRadius: 12, marginBottom: 16, fontSize: 16, borderWidth: 1, borderColor: "#E8E8E8" },
-  inputCode: { backgroundColor: "#F5F7FA", padding: 18, borderRadius: 12, marginBottom: 20, fontSize: 28, fontWeight: "700", letterSpacing: 8, borderWidth: 1, borderColor: "#E8E8E8" },
 
   btnMain: { backgroundColor: BRAND, padding: 16, borderRadius: 12, width: "100%", alignItems: "center", marginTop: 12, flexDirection: "row", justifyContent: "center" },
   btnDisabled: { opacity: 0.6 },
@@ -791,7 +844,6 @@ const styles = StyleSheet.create({
   infoTitle: { fontWeight: "700", color: "#333", marginBottom: 8, fontSize: 15 },
   infoText: { color: "#555", fontSize: 14, lineHeight: 22 },
 
-  // Device & WiFi list cards
   deviceCard: {
     backgroundColor: "#F8FAFB",
     padding: 16,
@@ -805,17 +857,12 @@ const styles = StyleSheet.create({
   deviceName: { fontSize: 16, fontWeight: "600", color: "#333" },
   deviceSub: { fontSize: 13, color: "#888", marginTop: 2 },
 
-  // Mode-chooser cards (BLE / Wi-Fi AP)
-  modeCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#F8FAFB",
-    padding: 18,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "#E0E8F0",
-    marginTop: 12,
+  joinPill: {
+    backgroundColor: BRAND,
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    marginLeft: 8,
   },
-  modeTitle: { fontSize: 17, fontWeight: "700", color: "#222" },
-  modeSub: { fontSize: 13, color: "#777", marginTop: 4, lineHeight: 18 },
+  joinPillTxt: { color: "#fff", fontWeight: "700", fontSize: 13 },
 });

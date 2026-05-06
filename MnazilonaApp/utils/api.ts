@@ -1,7 +1,7 @@
 // utils/api.ts
 
 import * as SecureStore from 'expo-secure-store';
-import { API_URL, APP_CONFIG } from '../constants/api';
+import { API_URL, APP_CONFIG, ENDPOINTS } from '../constants/api';
 
 // ======================================
 // Types
@@ -66,6 +66,35 @@ export const TokenManager = {
 };
 
 // ======================================
+// Refresh Token Management
+// ======================================
+export const RefreshTokenManager = {
+  async get(): Promise<string | null> {
+    try {
+      return await SecureStore.getItemAsync(APP_CONFIG.REFRESH_TOKEN_KEY);
+    } catch {
+      return null;
+    }
+  },
+
+  async set(token: string): Promise<void> {
+    try {
+      await SecureStore.setItemAsync(APP_CONFIG.REFRESH_TOKEN_KEY, token);
+    } catch {
+      // Non-fatal
+    }
+  },
+
+  async remove(): Promise<void> {
+    try {
+      await SecureStore.deleteItemAsync(APP_CONFIG.REFRESH_TOKEN_KEY);
+    } catch {
+      // Non-fatal
+    }
+  },
+};
+
+// ======================================
 // User Data Management
 // ======================================
 export const UserDataManager = {
@@ -112,6 +141,42 @@ let onAuthExpired: (() => void) | null = null;
 
 export function setAuthExpiredHandler(handler: () => void): void {
   onAuthExpired = handler;
+}
+
+// ======================================
+// Token Refresh (coalesced — server rotates refresh tokens, so concurrent
+// refreshes would invalidate each other).
+// ======================================
+let refreshInFlight: Promise<string | null> | null = null;
+
+async function performTokenRefresh(): Promise<string | null> {
+  if (refreshInFlight) return refreshInFlight;
+
+  refreshInFlight = (async () => {
+    const refreshToken = await RefreshTokenManager.get();
+    if (!refreshToken) return null;
+
+    const res = await fetch(`${API_URL}${ENDPOINTS.AUTH.REFRESH}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    }).catch(() => null);
+
+    if (!res || !res.ok) return null;
+
+    const data = await res.json().catch(() => null);
+    if (!data?.token || !data?.refreshToken) return null;
+
+    await TokenManager.set(data.token);
+    await RefreshTokenManager.set(data.refreshToken);
+    return data.token as string;
+  })();
+
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+  }
 }
 
 // ======================================
@@ -172,15 +237,47 @@ export async function apiRequest<T = any>(
     }
 
     if (!response.ok) {
-      // Auto-logout on 401: token expired or invalidated
-      // Skip when explicitly disabled (e.g. the logout call itself) to avoid recursion.
-      if (
-        response.status === 401 &&
-        requireAuth &&
-        !skipAuthExpiredHandler &&
-        onAuthExpired
-      ) {
-        onAuthExpired();
+      // On 401: try a one-shot refresh + retry before giving up.
+      // skipAuthExpiredHandler short-circuits this for the logout call itself.
+      if (response.status === 401 && requireAuth && !skipAuthExpiredHandler) {
+        const newToken = await performTokenRefresh();
+        if (newToken) {
+          requestHeaders['Authorization'] = `Bearer ${newToken}`;
+          const retryController = new AbortController();
+          const retryTimeoutId = setTimeout(() => retryController.abort(), timeout);
+          try {
+            const retry = await fetch(`${API_URL}${endpoint}`, {
+              method,
+              headers: requestHeaders,
+              body: body ? JSON.stringify(body) : undefined,
+              signal: signal || retryController.signal,
+            });
+            clearTimeout(retryTimeoutId);
+
+            const retryCT = retry.headers.get('content-type') || '';
+            const retryData = retryCT.includes('application/json')
+              ? await retry.json().catch(() => null)
+              : null;
+
+            if (retry.ok) {
+              return { success: true, data: retryData, status: retry.status };
+            }
+
+            // Refresh succeeded but retry still 401 → token version revoked, etc.
+            if (retry.status === 401 && onAuthExpired) onAuthExpired();
+            return {
+              success: false,
+              message: retryData?.message || getDefaultErrorMessage(retry.status),
+              status: retry.status,
+              data: retryData,
+            };
+          } catch {
+            clearTimeout(retryTimeoutId);
+            // Fall through to original 401 response below.
+          }
+        }
+
+        if (onAuthExpired) onAuthExpired();
       }
 
       return {

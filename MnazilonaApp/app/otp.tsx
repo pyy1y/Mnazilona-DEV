@@ -242,10 +242,10 @@ export default function OTPScreen() {
       }
 
       // Handle successful verification
-      const { token, user } = response.data || {};
+      const { token, refreshToken, user } = response.data || {};
 
       if (token) {
-        await login(token, user);
+        await login(token, refreshToken, user);
       }
 
       // Clear register draft from SecureStore

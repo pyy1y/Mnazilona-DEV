@@ -10,7 +10,7 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "buildNumber": "1",
+      "buildNumber": "17",
       "bundleIdentifier": "com.mnazilona.MnazilonaApp",
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "Required to connect to Mnazilona devices for setup and control.",
@@ -19,11 +19,14 @@
         "NSLocationWhenInUseUsageDescription": "Required to detect the WiFi network during device setup.",
         "NSBonjourServices": [
           "_mnazilona._tcp",
+          "_http._tcp",
+          "_mnazilona._tcp",
           "_http._tcp"
         ],
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": false
-        }
+        },
+        "ITSAppUsesNonExemptEncryption": false
       },
       "entitlements": {
         "com.apple.developer.networking.HotspotConfiguration": true,
@@ -76,6 +79,13 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "055b3ee0-09e6-48db-ae97-c80bc0df293f"
+      }
+    },
+    "owner": "pyy1y"
   }
 }

@@ -13,6 +13,8 @@ const fs = require('fs');
 
 const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://localhost';
 const MQTT_BROKER_HOST = process.env.MQTT_BROKER_HOST || 'localhost';
+const MQTT_PUBLIC_HOST = process.env.MQTT_PUBLIC_HOST || MQTT_BROKER_HOST;
+const MQTT_PUBLIC_PORT = parseInt(process.env.MQTT_PUBLIC_PORT, 10) || 1883;
 
 const mqttOptions = {
   username: process.env.MQTT_USERNAME || 'mqtt-user',
@@ -418,4 +420,6 @@ module.exports = {
   invalidateDeviceMeta,
   MQTT_BROKER_HOST,
   MQTT_BROKER_URL,
+  MQTT_PUBLIC_HOST,
+  MQTT_PUBLIC_PORT,
 };

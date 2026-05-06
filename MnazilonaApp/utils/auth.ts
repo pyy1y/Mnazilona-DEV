@@ -4,7 +4,7 @@
 import { saveUser, clearUser } from './userStorage';
 
 import { jwtDecode } from 'jwt-decode';
-import { TokenManager, UserDataManager, api } from './api';
+import { TokenManager, RefreshTokenManager, UserDataManager, api } from './api';
 import { ENDPOINTS } from '../constants/api';
 import { connectSocket, disconnectSocket } from './socket';
 
@@ -103,13 +103,17 @@ export async function checkAuthState(): Promise<{
 
 export async function login(
   token: string,
+  refreshToken?: string,
   userData?: Record<string, any>
 ): Promise<boolean> {
   try {
     if (isTokenExpired(token)) return false;
 
-    // 1) Save token
+    // 1) Save token (and refresh token, if provided)
     await TokenManager.set(token);
+    if (refreshToken) {
+      await RefreshTokenManager.set(refreshToken);
+    }
 
     // 2) Extract from token (preferred)
     const userFromToken = getUserFromToken(token);
@@ -178,6 +182,7 @@ export async function logout(): Promise<void> {
       disconnectSocket();
       await UserDataManager.clear();
       await TokenManager.remove();
+      await RefreshTokenManager.remove();
       await clearUser();
     }
   })();

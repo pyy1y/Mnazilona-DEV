@@ -20,7 +20,7 @@ const PUBLIC_ROUTES = [
 ] as const;
 
 // الصفحات المحمية خارج tabs
-const PROTECTED_ROUTES = ['settings', 'pairing'] as const;
+const PROTECTED_ROUTES = ['settings', 'pairing', 'pairing-ap'] as const;
 
 type PublicRoute = (typeof PUBLIC_ROUTES)[number];
 type ProtectedRoute = (typeof PROTECTED_ROUTES)[number];

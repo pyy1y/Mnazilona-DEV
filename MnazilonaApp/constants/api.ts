@@ -2,7 +2,7 @@
 // ======================================
 // API Configuration
 // ======================================
-const DEFAULT_DEV_API_URL = 'http://172.20.10.2:3000';
+const DEFAULT_DEV_API_URL = 'https://mnazilona.xyz/api';
 const DEFAULT_PROD_API_URL = 'https://mnazilona.xyz/api';
 const isDev = __DEV__;
 
@@ -38,6 +38,7 @@ export const ENDPOINTS = {
     RESET_PASSWORD: '/auth/password/reset',
     CHANGE_PASSWORD: '/auth/password/change',
     LOGOUT: '/auth/logout',
+    REFRESH: '/auth/refresh-token',
   },
 
   // User / Profile
@@ -91,6 +92,7 @@ export const ENDPOINTS = {
 // ======================================
 export const APP_CONFIG = {
   TOKEN_KEY: 'auth_token',
+  REFRESH_TOKEN_KEY: 'auth_refresh_token',
   USER_DATA_KEY: 'user_data',
   OTP_LENGTH: 6,
   OTP_RESEND_SECONDS: 60,
