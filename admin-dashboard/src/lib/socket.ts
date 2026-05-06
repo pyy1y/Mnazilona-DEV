@@ -10,6 +10,13 @@ const TOKEN_KEY = 'admin_token';
 const getStoredToken = () =>
   Cookies.get(TOKEN_KEY) || (typeof window !== 'undefined' ? window.localStorage.getItem(TOKEN_KEY) : null);
 
+const getSocketBaseUrl = () => {
+  const fallbackOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
+  const url = new URL(API_BASE, fallbackOrigin);
+  url.pathname = url.pathname.replace(/\/api(?:\/v\d+)?\/?$/, '');
+  return url.pathname === '/' ? url.origin : `${url.origin}${url.pathname.replace(/\/$/, '')}`;
+};
+
 // Server -> client event payloads (kept in sync with backend emitToAdmins calls)
 export interface DeviceStatusPayload {
   serialNumber: string;
@@ -138,7 +145,7 @@ function subscriptionKey(payload: AdminSubscription): string {
 
 function buildSocket(): TypedSocket {
   const token = getStoredToken();
-  const socket = io(`${API_BASE}/admin`, {
+  const socket = io(`${getSocketBaseUrl()}/admin`, {
     auth: { token },
     transports: ['websocket', 'polling'],
     reconnection: true,
