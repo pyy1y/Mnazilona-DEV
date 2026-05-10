@@ -3,6 +3,7 @@
  *  Mnazilona IoT - ESP8266 Firmware v1.1.0 (Wi-Fi AP variant)
  *  SoftAP Provisioning (no PoP) + DeviceSecret
  *  Port of GarageRelayFirmwareWiFiAP.ino (ESP32-C6) to ESP8266
+ *  Hardware target: Shelly 1 / Shelly relay (ESP8266)
  * ═══════════════════════════════════════════════════════════════
  *
  *  Functional parity with the ESP32-C6 firmware. Differences vs.
@@ -15,7 +16,12 @@
  *      "verify after MQTT connect" flow is dropped. Update.h still
  *      provides single-image upgrade with reboot.
  *    - WIFI_MODE_NULL → WIFI_OFF
- *    - Pins relocated to NodeMCU/Wemos D1-friendly GPIOs (see below)
+ *    - Pins remapped for Shelly: GPIO4 = relay, GPIO5 = SW input
+ *    - LED + dedicated push-button + door sensor: NOT PRESENT on
+ *      Shelly hardware. LED helpers are stubbed to no-ops; door
+ *      sensor is reported as "unknown"; the physical button
+ *      (factory reset / reboot) is replaced by a SW-input pattern
+ *      (see handleShellySwitch below).
  *
  *  Arduino IDE Setup:
  *    Board:  NodeMCU 1.0 (ESP-12E) or Wemos D1 mini
@@ -89,7 +95,7 @@ uint32_t      wifiProvisionedAt    = 0;
 // CONFIG - ثوابت غير سرية
 // ═══════════════════════════════════════
 #define DEVICE_NAME       "Garage Relay"
-#define FIRMWARE_VERSION  "1.0.2-ap-8266"
+#define FIRMWARE_VERSION  "1.0.3-shelly"
 
 // هوية الجهاز (السيريال + الـ secret) تُقرأ من LittleFS — تُحرق مرة وحدة
 // أثناء التصنيع. لكل جهاز قيم فريدة. لا تكتبها في الكود أبداً!
@@ -112,19 +118,45 @@ const char* ca_cert = "";
 #endif
 
 // ═══════════════════════════════════════
-// Hardware Pins (ESP8266 — adjust for your board)
+// Hardware Pins (Shelly 1 / Shelly relay - ESP8266)
 // ═══════════════════════════════════════
-// NodeMCU 1.0 / Wemos D1 mini friendly defaults. GPIO0/2/15 avoided
-// for dynamic I/O because they affect boot mode.
-#define RELAY_PIN         5    // D1
-#define BUTTON_PIN        13   // D7  (INPUT_PULLUP)
-#define DOOR_SENSOR_PIN   4    // D2
-#define LED_R             14   // D5
-#define LED_G             12   // D6
-#define LED_B             16   // D0  (no internal pull-up; PWM not supported)
+// Shelly terminal mapping:
+//   L(-)  → mains hot in
+//   N(+)  → mains neutral
+//   I     → relay input (mains hot, switched to O via the relay)
+//   O     → relay output (to garage door opener trigger)
+//   SW    → wall-switch input (referenced through the device's
+//           internal optocoupler to GPIO5)
+//
+// MCU pin map:
+//   GPIO4 → relay coil driver  (active HIGH)
+//   GPIO5 → SW input           (no internal pull; optocoupler-driven)
+//
+// The Shelly does NOT expose:
+//   - a dedicated user LED       → all setLED_*() are no-ops below
+//   - a separate push-button     → SW input doubles as pairing trigger
+//   - a garage open/closed sensor → reported as "unknown"
+#define RELAY_PIN         4    // GPIO4 → relay
+#define SW_PIN            5    // GPIO5 → Shelly SW input
+
+// Legacy aliases retained so call sites compile without rewriting them.
+// The pins below point at SW so any leftover read on BUTTON_PIN does
+// not float; the door sensor pin is unused but kept defined.
+#define BUTTON_PIN        SW_PIN   // unused — handleButton replaced by handleShellySwitch
+#define DOOR_SENSOR_PIN   SW_PIN   // unused — door sensor not present
+
+// LED pins are unused on Shelly. Kept defined so legacy pinMode/
+// digitalWrite call sites remain valid; setLED_*() are stubbed below.
+#define LED_R             4
+#define LED_G             4
+#define LED_B             4
 #define LED_ACTIVE_LOW    false
 
+// Door sensor not present; constant kept for compile compatibility.
 #define DOOR_OPEN_STATE   LOW
+
+// Door state we report when no physical sensor is wired.
+#define DOOR_STATE_FALLBACK "unknown"
 
 // ═══════════════════════════════════════
 // Timing
@@ -324,6 +356,10 @@ bool     doorStateInitialized = false;
 uint8_t doorDebounceCount    = 0;
 bool    doorDebouncePending  = false;
 
+// Wi-Fi reconnect → AP fallback
+#define WIFI_RECONNECT_MAX_FAILURES 6   // ~3 minutes at 30 s retry interval
+uint8_t wifiReconnectFailCount = 0;
+
 // Command Rate Limiting
 #define CMD_RATE_WINDOW_MS    5000UL
 #define CMD_RATE_MAX          10
@@ -386,55 +422,21 @@ uint32_t lastOtaCheckMs      = 0;
 
 
 // ══════════════════════════════════════
-//            LED CONTROL
+//            LED CONTROL (no-op on Shelly)
 // ══════════════════════════════════════
+// Shelly relay devices have no user-addressable LED. Helpers below
+// are stubbed so existing call sites compile and run unchanged.
 
-inline void ledWrite(int pin, bool on) {
-  digitalWrite(pin, LED_ACTIVE_LOW ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
-}
-
-void setLED(bool r, bool g, bool b) {
-  ledWrite(LED_R, r);
-  ledWrite(LED_G, g);
-  ledWrite(LED_B, b);
-}
-
-void setLED_off()     { setLED(false, false, false); }
-void setLED_online()  { setLED(false, true,  false); }
-void setLED_offline() { setLED(true,  false, false); }
-void setLED_ap()      { setLED(false, false, true);  }
-void setLED_action()  { setLED(false, true,  true);  }
-void setLED_error()   { setLED(true,  false, true);  }
-void setLED_pairing() { setLED(true,  true,  false); }
-
-void blinkLED() {
-  if (millis() - lastLedToggle < 500) return;
-  lastLedToggle = millis();
-  ledToggleState = !ledToggleState;
-
-  switch (currentState) {
-    case STATE_AP_ACTIVE:
-      ledToggleState ? setLED_ap() : setLED_off();
-      break;
-    case STATE_AP_CONNECTING_STA:
-    case STATE_WIFI_CONNECTING:
-    case STATE_SERVER_INQUIRY:
-    case STATE_MQTT_CONNECTING:
-      ledToggleState ? setLED_pairing() : setLED_off();
-      break;
-    case STATE_WIFI_RECONNECTING:
-      ledToggleState ? setLED_offline() : setLED_off();
-      break;
-    case STATE_OTA_UPDATING:
-      ledToggleState ? setLED_pairing() : setLED_ap();
-      break;
-    case STATE_ERROR:
-      ledToggleState ? setLED_error() : setLED_off();
-      break;
-    default:
-      break;
-  }
-}
+inline void ledWrite(int /*pin*/, bool /*on*/) { /* no-op */ }
+void setLED(bool /*r*/, bool /*g*/, bool /*b*/) { /* no-op */ }
+void setLED_off()     {}
+void setLED_online()  {}
+void setLED_offline() {}
+void setLED_ap()      {}
+void setLED_action()  {}
+void setLED_error()   {}
+void setLED_pairing() {}
+void blinkLED()       {}
 
 
 // ══════════════════════════════════════
@@ -563,62 +565,26 @@ void clearAllSettings() {
 
 
 // ══════════════════════════════════════
-//         DOOR SENSOR (SW-420)
+//         DOOR SENSOR (NOT PRESENT on Shelly)
 // ══════════════════════════════════════
+// The Shelly relay has no garage door open/closed sensor. We keep
+// the public surface (readDoorOpen, handleDoorSensor) so the rest of
+// the firmware compiles unchanged, but everything is a no-op and the
+// reported door state is DOOR_STATE_FALLBACK ("unknown"). If you
+// later wire a reed switch to a free GPIO, restore the original logic
+// here and switch the heartbeat/status JSON back to "open"/"closed".
 
 bool readDoorOpen() {
-  return digitalRead(DOOR_SENSOR_PIN) == DOOR_OPEN_STATE;
+  return false;
 }
 
 void handleDoorSensor() {
-  if (millis() - lastDoorCheckMs < DOOR_SENSOR_CHECK_MS) return;
-  lastDoorCheckMs = millis();
-
-  bool currentOpen = readDoorOpen();
-
   if (!doorStateInitialized) {
-    lastDoorState = currentOpen;
     doorStateInitialized = true;
-    doorDebounceCount = 0;
-    doorDebouncePending = false;
-
-    const char* state = currentOpen ? "open" : "closed";
-    Serial.printf("[Door] Initial state: %s\n", state);
-    return;
-  }
-
-  if (currentOpen != lastDoorState) {
-    if (!doorDebouncePending) {
-      doorDebouncePending = true;
-      doorDebounceCount = 1;
-    } else {
-      doorDebounceCount++;
-    }
-
-    if (doorDebounceCount >= DOOR_DEBOUNCE_READS) {
-      lastDoorState = currentOpen;
-      doorDebouncePending = false;
-      doorDebounceCount = 0;
-
-      const char* state = currentOpen ? "open" : "closed";
-      Serial.printf("[Door] State: %s (debounced)\n", state);
-
-      char logMsg[40];
-      snprintf(logMsg, sizeof(logMsg), "Door sensor: %s", state);
-      addLog(logMsg, currentOpen ? "warning" : "info");
-
-      if (mqttClient.connected()) {
-        JsonDocument doc;
-        doc["doorState"] = state;
-        doc["ts"] = millis();
-        String payload;
-        serializeJson(doc, payload);
-        mqttClient.publish(topicOf("dp/report").c_str(), payload.c_str(), false);
-      }
-    }
-  } else {
-    doorDebouncePending = false;
-    doorDebounceCount = 0;
+    lastDoorState        = false;
+    doorDebounceCount    = 0;
+    doorDebouncePending  = false;
+    Serial.println("[Door] No sensor on Shelly — reporting 'unknown'");
   }
 }
 
@@ -842,7 +808,7 @@ void mqttPublishHeartbeat() {
   doc["fw"]        = FIRMWARE_VERSION;
   doc["heap"]      = ESP.getFreeHeap();
   doc["relay"]     = relayActive ? "opened" : "closed";
-  doc["doorState"] = lastDoorState ? "open" : "closed";
+  doc["doorState"] = DOOR_STATE_FALLBACK;
   doc["uptime"]    = millis() / 1000;
   String payload;
   serializeJson(doc, payload);
@@ -1299,7 +1265,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (mqttClient.connected()) {
       JsonDocument rDoc;
       rDoc["relay"]     = relayActive ? "opened" : "closed";
-      rDoc["doorState"] = lastDoorState ? "open" : "closed";
+      rDoc["doorState"] = DOOR_STATE_FALLBACK;
       rDoc["rssi"]      = WiFi.RSSI();
       rDoc["heap"]      = ESP.getFreeHeap();
       rDoc["fw"]        = FIRMWARE_VERSION;
@@ -1631,7 +1597,7 @@ void startLocalServer() {
       prefs.end();
       JsonDocument rDoc;
       rDoc["relay"]       = relayActive ? "opened" : "closed";
-      rDoc["doorState"]   = lastDoorState ? "open" : "closed";
+      rDoc["doorState"]   = DOOR_STATE_FALLBACK;
       rDoc["rssi"]        = WiFi.RSSI();
       rDoc["fw"]          = FIRMWARE_VERSION;
       rDoc["local"]       = true;
@@ -1655,7 +1621,7 @@ void startLocalServer() {
     doc["type"]          = "relay";
     doc["fw"]            = FIRMWARE_VERSION;
     doc["relay"]         = relayActive ? "opened" : "closed";
-    doc["doorState"]     = lastDoorState ? "open" : "closed";
+    doc["doorState"]     = DOOR_STATE_FALLBACK;
     doc["isOnline"]      = true;
     doc["rssi"]          = WiFi.RSSI();
     doc["heap"]          = ESP.getFreeHeap();
@@ -1990,25 +1956,40 @@ void handleApConfigPending() {
 
 
 // ══════════════════════════════════════
-//            BUTTON
+//        SHELLY SW INPUT HANDLER
 // ══════════════════════════════════════
-//   2s hold → reboot
-//   5s hold → factory reset (returns to AP pairing mode)
+// The Shelly has no dedicated push-button. The SW terminal is wired
+// (via the device's optocoupler) to GPIO5 and reflects the state of
+// an external wall switch — could be momentary or latching.
+//
+// Behavior on each *debounced* SW transition:
+//   1. Trigger a local relay pulse so the wall switch can still open
+//      the garage even when the device is offline (set
+//      SW_PULSE_TRIGGERS_RELAY to 0 to disable).
+//   2. Track the transition in a sliding window. If the user produces
+//      SW_PAIR_TOGGLES transitions within SW_PAIR_WINDOW_MS, treat it
+//      as the "enter pairing" gesture: factory-reset the configuration
+//      and reboot into AP provisioning mode.
+//
+// This works for both momentary and latching wall switches: flipping
+// a toggle 5× counts as 5 transitions just the same.
 
-#define BUTTON_DEBOUNCE_MS    50UL
-#define BUTTON_REBOOT_MS      2000UL
-#define BUTTON_RESET_MS       5000UL
+#define SW_DEBOUNCE_MS         30UL
+#define SW_PAIR_TOGGLES        5
+#define SW_PAIR_WINDOW_MS      5000UL
+#define SW_PULSE_TRIGGERS_RELAY 1
 
-static bool     buttonHeld         = false;
-static uint32_t buttonPressStartMs = 0;
-static uint32_t buttonLastEdgeMs   = 0;
-static uint8_t  buttonLedPhase     = 0;
+static int      swStableLevel       = -1;  // -1 == not yet sampled
+static int      swLastReadLevel     = -1;
+static uint32_t swLastChangeMs      = 0;
+static uint32_t swToggleTimes[SW_PAIR_TOGGLES] = {0};
+static uint8_t  swToggleHead        = 0;
+static uint8_t  swToggleCount       = 0;
 
 static void doFactoryReset() {
-  Serial.println("[Button] >>> FACTORY RESET (5s) — clearing config and restarting");
-  addLog("Factory reset (button 5s)", "warning");
+  Serial.println("[SW] >>> FACTORY RESET — clearing config and restarting");
+  addLog("Factory reset via SW pattern", "warning");
 
-  setLED(true, true, true);
   stopLocalServer();
   if (mqttClient.connected()) {
     mqttPublishStatus("offline");
@@ -2020,10 +2001,8 @@ static void doFactoryReset() {
 }
 
 static void doReboot() {
-  Serial.println("[Button] >>> REBOOT (2s)");
-  addLog("Reboot (button 2s)", "info");
-
-  setLED(false, false, true);
+  Serial.println("[SW] >>> REBOOT");
+  addLog("Reboot via SW", "info");
   if (mqttClient.connected()) {
     mqttPublishStatus("offline");
     mqttClient.disconnect();
@@ -2032,47 +2011,52 @@ static void doReboot() {
   ESP.restart();
 }
 
+// Kept name for compatibility with the loop() call site.
 void handleButton() {
-  bool pressed = (digitalRead(BUTTON_PIN) == LOW);
+  int reading  = digitalRead(SW_PIN);
   uint32_t now = millis();
 
-  if (pressed && !buttonHeld) {
-    if (now - buttonLastEdgeMs < BUTTON_DEBOUNCE_MS) return;
-    buttonHeld         = true;
-    buttonPressStartMs = now;
-    buttonLastEdgeMs   = now;
-    buttonLedPhase     = 0;
-    Serial.println("[Button] Press start");
+  if (swStableLevel < 0) {
+    swStableLevel   = reading;
+    swLastReadLevel = reading;
+    swLastChangeMs  = now;
     return;
   }
 
-  if (!pressed && buttonHeld) {
-    if (now - buttonLastEdgeMs < BUTTON_DEBOUNCE_MS) return;
-    uint32_t dur = now - buttonPressStartMs;
-    buttonHeld       = false;
-    buttonLastEdgeMs = now;
-    buttonLedPhase   = 0;
-    Serial.printf("[Button] Released after %lu ms\n", (unsigned long)dur);
+  if (reading != swLastReadLevel) {
+    swLastReadLevel = reading;
+    swLastChangeMs  = now;
+    return;
+  }
 
-    if (dur >= BUTTON_RESET_MS) {
+  // Same reading as last call; require it to remain stable for the
+  // debounce window before accepting it as a confirmed transition.
+  if (reading == swStableLevel) return;
+  if ((now - swLastChangeMs) < SW_DEBOUNCE_MS) return;
+
+  swStableLevel = reading;
+  Serial.printf("[SW] Transition -> %d\n", reading);
+
+  // Slide the most recent transition into the ring buffer.
+  swToggleTimes[swToggleHead] = now;
+  swToggleHead = (swToggleHead + 1) % SW_PAIR_TOGGLES;
+  if (swToggleCount < SW_PAIR_TOGGLES) swToggleCount++;
+
+  // If the buffer is full and the oldest entry is within the window,
+  // we have N transitions in <window> → enter pairing mode.
+  if (swToggleCount >= SW_PAIR_TOGGLES) {
+    uint32_t oldest = swToggleTimes[swToggleHead];  // next slot is oldest
+    if ((now - oldest) <= SW_PAIR_WINDOW_MS) {
+      Serial.println("[SW] Pairing pattern detected (5 toggles in 5s)");
       doFactoryReset();
-    } else if (dur >= BUTTON_REBOOT_MS) {
-      doReboot();
+      return;  // not reached — doFactoryReset reboots
     }
-    return;
   }
 
-  if (pressed && buttonHeld) {
-    uint32_t dur = now - buttonPressStartMs;
-    if (dur >= BUTTON_RESET_MS && buttonLedPhase < 2) {
-      buttonLedPhase = 2;
-      setLED(true, true, true);
-      Serial.println("[Button] 5s threshold — release for FACTORY RESET");
-    } else if (dur >= BUTTON_REBOOT_MS && buttonLedPhase < 1) {
-      buttonLedPhase = 1;
-      setLED(false, false, true);
-      Serial.println("[Button] 2s threshold — release for REBOOT");
-    }
+  // Local override: pulse the relay on each SW transition so the
+  // physical wall switch keeps working when the cloud is unavailable.
+  if (SW_PULSE_TRIGGERS_RELAY) {
+    startRelayPulse();
   }
 }
 
@@ -2168,6 +2152,7 @@ void handleStateMachine() {
       }
       lastWifiRetryMs = millis();
       if (connectWiFi(storedSSID, storedPassword)) {
+        wifiReconnectFailCount = 0;
         if (!ntpSynced) syncNTP();
 
         if (mqttHost.length() == 0) {
@@ -2184,7 +2169,17 @@ void handleStateMachine() {
         setLED_online();
         connectMQTT();
       } else {
-        blinkLED();
+        wifiReconnectFailCount++;
+        Serial.printf("[Reconnect] Wi-Fi retry %u/%u failed\n",
+                      wifiReconnectFailCount, WIFI_RECONNECT_MAX_FAILURES);
+        if (wifiReconnectFailCount >= WIFI_RECONNECT_MAX_FAILURES) {
+          Serial.println("[Reconnect] Max retries — falling back to AP provisioning");
+          addLog("Wi-Fi unreachable — entering AP mode", "warning");
+          wifiReconnectFailCount = 0;
+          startAP();
+        } else {
+          blinkLED();
+        }
       }
       break;
 
@@ -2207,14 +2202,15 @@ void handleStateMachine() {
 // ══════════════════════════════════════
 
 void setup() {
+  // Shelly relay (ESP8266) pin init.
+  //  - GPIO4 (RELAY_PIN): output, default LOW (relay de-energised).
+  //  - GPIO5 (SW_PIN):    plain INPUT — the Shelly drives this line
+  //                       through its on-board optocoupler, so do NOT
+  //                       enable the internal pull-up.
+  //  - LED / dedicated button / door sensor: not present, no pinMode.
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(DOOR_SENSOR_PIN, INPUT);
-  pinMode(LED_R, OUTPUT);
-  pinMode(LED_G, OUTPUT);
-  pinMode(LED_B, OUTPUT);
-  setLED_off();
+  pinMode(SW_PIN, INPUT);
 
   Serial.begin(115200);
   delay(1000);

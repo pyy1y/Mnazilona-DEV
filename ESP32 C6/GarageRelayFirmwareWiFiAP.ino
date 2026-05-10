@@ -92,7 +92,7 @@ uint32_t      wifiProvisionedAt    = 0;
 // CONFIG - ثوابت غير سرية
 // ═══════════════════════════════════════
 #define DEVICE_NAME       "Garage Relay"
-#define FIRMWARE_VERSION  "1.0.2-ap"
+#define FIRMWARE_VERSION  "1.0.0"
 
 // هوية الجهاز (السيريال + الـ secret) تُقرأ من NVS — تُحرق مرة وحدة
 // أثناء التصنيع. لكل جهاز قيم فريدة. لا تكتبها في الكود أبداً!
@@ -104,7 +104,7 @@ String deviceSecret = "";
 // SERVER & TLS CONFIG
 // ═══════════════════════════════════════
 //#define SERVER_BASE_URL   "https://your-domain.com"
-#define SERVER_BASE_URL   "http://192.168.8.143:3000"
+#define SERVER_BASE_URL   "https://mnazilona.xyz/api"
 #define SERVER_INQUIRY_PATH "/devices/inquiry"
 #define SERVER_OTA_CHECK_PATH "/devices/ota/check"
 

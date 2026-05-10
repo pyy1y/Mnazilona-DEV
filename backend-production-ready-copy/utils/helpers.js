@@ -39,9 +39,9 @@ const isValidObjectId = (id) => /^[a-fA-F0-9]{24}$/.test(String(id || ''));
 // Auth
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const ACCESS_TOKEN_EXPIRY = '15m';
-const REFRESH_TOKEN_EXPIRY = '7d';
-const REFRESH_TOKEN_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+const ACCESS_TOKEN_EXPIRY = '7d';
+const REFRESH_TOKEN_EXPIRY = '30d';
+const REFRESH_TOKEN_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
 
 const generateToken = (user) => {
   return jwt.sign(
