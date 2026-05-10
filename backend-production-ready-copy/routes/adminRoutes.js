@@ -3,6 +3,7 @@ const path = require('path');
 const multer = require('multer');
 const router = express.Router();
 const adminController = require('../controllers/adminController');
+const adminWebsiteRoutes = require('./adminWebsiteRoutes');
 const auth = require('../middleware/auth');
 const adminAuth = require('../middleware/adminAuth');
 const { apiLimiter, otpSendLimiter, otpVerifyLimiter } = require('../middleware/rateLimiter');
@@ -43,6 +44,9 @@ router.use(auth, adminAuth);
 
 // Dashboard
 router.get('/dashboard', adminController.getDashboard);
+
+// Landing Page CMS
+router.use('/website', adminWebsiteRoutes);
 
 // User Management
 router.get('/users', adminController.listUsers);

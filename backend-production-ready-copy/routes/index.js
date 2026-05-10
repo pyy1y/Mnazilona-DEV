@@ -7,6 +7,10 @@ const apiRoutes = require('./apiRoutes');
 const notificationRoutes = require('./notificationRoutes');
 const roomRoutes = require('./roomRoutes');
 const adminRoutes = require('./adminRoutes');
+const websiteRoutes = require('./websiteRoutes');
+const adminWebsiteRoutes = require('./adminWebsiteRoutes');
+const auth = require('../middleware/auth');
+const adminAuth = require('../middleware/adminAuth');
 
 // API v1 routes
 const v1 = express.Router();
@@ -16,8 +20,13 @@ v1.use('/api', apiRoutes);
 v1.use('/notifications', notificationRoutes);
 v1.use('/rooms', roomRoutes);
 v1.use('/admin', adminRoutes);
+v1.use('/website', websiteRoutes);
 
 router.use('/v1', v1);
+
+// Production-facing aliases for the landing-page CMS API.
+router.use('/api/v1/website', websiteRoutes);
+router.use('/api/v1/admin/website', auth, adminAuth, adminWebsiteRoutes);
 
 // Backward compatibility: mount same routes at root (remove when all clients migrate to /v1)
 router.use('/auth', authRoutes);
