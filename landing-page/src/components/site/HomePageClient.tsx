@@ -138,6 +138,12 @@ export default function HomePageClient() {
     googlePlayUrl: websiteSettings?.download?.googlePlayUrl || heroContent.googlePlayUrl,
   }), [heroContent.appStoreUrl, heroContent.googlePlayUrl, websiteSettings]);
 
+  const aboutContent = useMemo(() => ({
+    eyebrow: localizedValue(websiteSettings?.about?.label, language, t.about.eyebrow),
+    title: localizedValue(websiteSettings?.about?.title, language, t.about.title),
+    description: localizedValue(websiteSettings?.about?.description, language, t.about.description),
+  }), [language, t.about.description, t.about.eyebrow, t.about.title, websiteSettings]);
+
   return (
     <main dir={t.dir} lang={language} className="min-h-screen bg-[#071A3D] text-slate-950">
       <SiteHeader language={language} setLanguage={setLanguage} />
@@ -203,9 +209,9 @@ export default function HomePageClient() {
       <section id="about" className="animate-section-in bg-white py-20">
         <div className="mx-auto max-w-7xl px-5 sm:px-6 lg:px-8">
           <div className={`max-w-3xl ${textAlign}`}>
-            <p className="text-sm font-bold uppercase tracking-[0.18em] text-cyan-600">{t.about.eyebrow}</p>
-            <h2 className="mt-4 text-3xl font-bold tracking-normal text-[#061a4f] sm:text-4xl">{t.about.title}</h2>
-            <p className="mt-5 text-lg leading-8 text-slate-600">{t.about.description}</p>
+            <p className="text-sm font-bold uppercase tracking-[0.18em] text-cyan-600">{aboutContent.eyebrow}</p>
+            <h2 className="mt-4 text-3xl font-bold tracking-normal text-[#061a4f] sm:text-4xl">{aboutContent.title}</h2>
+            <p className="mt-5 text-lg leading-8 text-slate-600">{aboutContent.description}</p>
           </div>
         </div>
       </section>
