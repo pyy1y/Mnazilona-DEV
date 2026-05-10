@@ -14,6 +14,7 @@ import {
   Package,
   Ban,
   AlertTriangle,
+  FileText,
   LogOut,
 } from 'lucide-react';
 import { APP_NAME } from '@/app/constants';
@@ -28,6 +29,7 @@ const navItems = [
   { href: '/logs', label: 'Logs', icon: ScrollText },
   { href: '/security', label: 'Security', icon: Shield },
   { href: '/firmware', label: 'Firmware', icon: Package },
+  { href: '/landing-cms', label: 'Landing Page CMS', icon: FileText },
   { href: '/audit', label: 'Audit Log', icon: ClipboardList },
   { href: '/rate-limits', label: 'Rate Limits', icon: ShieldBan },
   { href: '/ip-blacklist', label: 'IP Blacklist', icon: Ban },
