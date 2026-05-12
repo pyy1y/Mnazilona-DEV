@@ -2261,9 +2261,10 @@ void setup() {
     Serial.println("[TLS] WARNING: insecure mode (dev only!)");
   }
   // BearSSL default is 16KB/16KB which exhausts ESP8266 heap during handshake.
-  // 1024 RX / 512 TX is the sweet spot for ESP8266: enough for Let's Encrypt
-  // cert chain without MFLN negotiation, but small enough to leave ~30KB heap.
-  wifiSecureClient.setBufferSizes(1024, 512);
+  // nginx + Let's Encrypt doesn't advertise MFLN, so the cert chain arrives in
+  // a single ~3-4KB TLS record - RX buffer must be >= record size or handshake
+  // fails with code -1. 4096 RX / 512 TX leaves ~20KB heap free.
+  wifiSecureClient.setBufferSizes(4096, 512);
 
   WiFi.mode(WIFI_STA);
   String macAddr = WiFi.macAddress();
