@@ -7,14 +7,11 @@ const apiRoutes = require('./apiRoutes');
 const notificationRoutes = require('./notificationRoutes');
 const roomRoutes = require('./roomRoutes');
 const adminRoutes = require('./adminRoutes');
-<<<<<<< HEAD
 const shareRoutes = require('./shareRoutes');
-=======
 const websiteRoutes = require('./websiteRoutes');
 const adminWebsiteRoutes = require('./adminWebsiteRoutes');
 const auth = require('../middleware/auth');
 const adminAuth = require('../middleware/adminAuth');
->>>>>>> c7012356ca1e3928ff3b797aa12173ee2ec3d193
 
 // API v1 routes
 const v1 = express.Router();
@@ -24,11 +21,9 @@ v1.use('/api', apiRoutes);
 v1.use('/notifications', notificationRoutes);
 v1.use('/rooms', roomRoutes);
 v1.use('/admin', adminRoutes);
-<<<<<<< HEAD
 v1.use('/shares', shareRoutes);
-=======
 v1.use('/website', websiteRoutes);
->>>>>>> c7012356ca1e3928ff3b797aa12173ee2ec3d193
+v1.use('/admin/website', auth, adminAuth, adminWebsiteRoutes);
 
 router.use('/v1', v1);
 
