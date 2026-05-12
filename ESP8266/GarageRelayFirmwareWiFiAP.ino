@@ -107,7 +107,7 @@ String deviceSecret = "";
 // SERVER & TLS CONFIG
 // ═══════════════════════════════════════
 //#define SERVER_BASE_URL   "https://your-domain.com"
-#define SERVER_BASE_URL   "http://192.168.8.143:3000"
+#define SERVER_BASE_URL   "https://mnazilona.xyz/api"
 #define SERVER_INQUIRY_PATH "/devices/inquiry"
 #define SERVER_OTA_CHECK_PATH "/devices/ota/check"
 
