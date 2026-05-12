@@ -10,7 +10,10 @@ const notificationSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['transfer_request', 'transfer_approved', 'transfer_denied', 'info'],
+      enum: [
+        'transfer_request', 'transfer_approved', 'transfer_denied', 'info',
+        'share_request', 'share_accepted', 'share_rejected', 'share_revoked',
+      ],
       required: true,
     },
     message: {
@@ -23,6 +26,12 @@ const notificationSchema = new mongoose.Schema(
       deviceName: { type: String, default: null },
       requesterId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
       requesterEmail: { type: String, default: null },
+      shareId: { type: mongoose.Schema.Types.ObjectId, ref: 'DeviceShare', default: null },
+      ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      ownerEmail: { type: String, default: null },
+      ownerName: { type: String, default: null },
+      sharedWithId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      sharedWithEmail: { type: String, default: null },
     },
     isRead: { type: Boolean, default: false, index: true },
     status: {

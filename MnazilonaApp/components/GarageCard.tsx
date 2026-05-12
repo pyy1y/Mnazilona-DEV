@@ -40,6 +40,7 @@ interface GarageCardProps {
   onAction: (serialNumber: string, command: GarageCommand) => void;
   onRename?: (serialNumber: string, newName: string) => void;
   onFetchLogs?: (serialNumber: string) => Promise<LogEntry[]>;
+  onSharePress?: () => void;
   brandColor: string;
   // Optional i18n texts
   onlineText?: string;
@@ -62,6 +63,7 @@ function GarageCard({
   onAction,
   onRename,
   onFetchLogs,
+  onSharePress,
   brandColor,
   onlineText = 'ONLINE',
   offlineText = 'OFFLINE',
@@ -202,6 +204,15 @@ function GarageCard({
               <MaterialCommunityIcons name="text-box-outline" size={22} color="#333" />
               <Text style={styles.menuItemText}>Device Logs</Text>
             </TouchableOpacity>
+            {onSharePress && (
+              <TouchableOpacity
+                style={styles.menuItem}
+                onPress={() => { closeModal(); onSharePress(); }}
+              >
+                <MaterialCommunityIcons name="share-variant" size={22} color="#333" />
+                <Text style={styles.menuItemText}>Share Device</Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity style={styles.cancelBtn} onPress={closeModal}>
               <Text style={styles.cancelBtnText}>Close</Text>
             </TouchableOpacity>

@@ -38,6 +38,7 @@ interface SecurityCardProps {
   onAction?: (serialNumber: string, command: { action: string; value?: any }) => void;
   onRename?: (serialNumber: string, newName: string) => void;
   onFetchLogs?: (serialNumber: string) => Promise<LogEntry[]>;
+  onSharePress?: () => void;
   brandColor: string;
   isDemo?: boolean;
   onlineText?: string;
@@ -86,6 +87,7 @@ function SecurityCard({
   onAction,
   onRename,
   onFetchLogs,
+  onSharePress,
   brandColor,
   isDemo = false,
   onlineText = 'ONLINE',
@@ -206,6 +208,15 @@ function SecurityCard({
               <TouchableOpacity style={styles.menuItem} onPress={handleOpenLogs}>
                 <MaterialCommunityIcons name="text-box-outline" size={22} color="#333" />
                 <Text style={styles.menuItemText}>Device Logs</Text>
+              </TouchableOpacity>
+            )}
+            {onSharePress && (
+              <TouchableOpacity
+                style={styles.menuItem}
+                onPress={() => { closeModal(); onSharePress(); }}
+              >
+                <MaterialCommunityIcons name="share-variant" size={22} color="#333" />
+                <Text style={styles.menuItemText}>Share Device</Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity style={styles.cancelBtn} onPress={closeModal}>

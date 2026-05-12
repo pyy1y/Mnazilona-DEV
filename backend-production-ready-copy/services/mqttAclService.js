@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const Device = require('../models/Device');
 const AllowedDevice = require('../models/AllowedDevice');
+const DeviceShare = require('../models/DeviceShare');
 
 const DEVICE_TOPIC_REGEX = /^mnazilona\/devices\/([A-Za-z0-9\-_.]+)\/(command|status|heartbeat|dp\/report|ota\/progress)$/;
 
@@ -16,25 +17,52 @@ const parseTopic = (topic) => {
 };
 
 const canUserAccessDevice = async (userId, serialNumber) => {
-  const device = await Device.findOne({
-    serialNumber: serialNumber.toUpperCase().trim(),
-    owner: userId,
+  const cleanSerial = serialNumber.toUpperCase().trim();
+  const device = await Device.findOne({ serialNumber: cleanSerial });
+  if (!device) return false;
+  if (device.owner && device.owner.toString() === userId.toString()) return true;
+
+  const share = await DeviceShare.findOne({
+    device: device._id,
+    sharedWith: userId,
+    status: 'active',
   });
-  return !!device;
+  return !!share;
+};
+
+// Returns the user's access on a device: { role: 'owner'|'shared', permissions }
+// or null if no access. Used by canUserPublish/Subscribe and reusable.
+const getUserDeviceAccess = async (userId, serialNumber) => {
+  const cleanSerial = serialNumber.toUpperCase().trim();
+  const device = await Device.findOne({ serialNumber: cleanSerial });
+  if (!device) return null;
+  if (device.owner && device.owner.toString() === userId.toString()) {
+    return { role: 'owner', permissions: ['view', 'control'], device };
+  }
+  const share = await DeviceShare.findOne({
+    device: device._id,
+    sharedWith: userId,
+    status: 'active',
+  }).select('permissions');
+  if (!share) return null;
+  return { role: 'shared', permissions: share.permissions || [], device };
 };
 
 const canUserPublish = async (userId, topic) => {
   const parsed = parseTopic(topic);
   if (!parsed) return false;
   if (!USER_PUBLISH_LEAVES.includes(parsed.leaf)) return false;
-  return canUserAccessDevice(userId, parsed.serialNumber);
+  const access = await getUserDeviceAccess(userId, parsed.serialNumber);
+  if (!access) return false;
+  return access.role === 'owner' || access.permissions.includes('control');
 };
 
 const canUserSubscribe = async (userId, topic) => {
   const parsed = parseTopic(topic);
   if (!parsed) return false;
   if (!USER_SUBSCRIBE_LEAVES.includes(parsed.leaf)) return false;
-  return canUserAccessDevice(userId, parsed.serialNumber);
+  const access = await getUserDeviceAccess(userId, parsed.serialNumber);
+  return !!access; // any active access (owner or shared) can subscribe
 };
 
 const canDevicePublish = async (deviceSerialNumber, topic) => {
@@ -56,16 +84,45 @@ const canDeviceSubscribe = async (deviceSerialNumber, topic) => {
 };
 
 const getUserACL = async (userId) => {
-  const devices = await Device.find({ owner: userId }).select('serialNumber').lean();
+  const [ownedDevices, activeShares] = await Promise.all([
+    Device.find({ owner: userId }).select('serialNumber').lean(),
+    DeviceShare.find({ sharedWith: userId, status: 'active' })
+      .select('serialNumber permissions')
+      .lean(),
+  ]);
 
   const acl = { publish: [], subscribe: [] };
+  const seen = new Set();
 
-  devices.forEach((device) => {
+  // Owners get full publish + subscribe access on their devices.
+  ownedDevices.forEach((device) => {
+    if (seen.has(device.serialNumber)) return;
+    seen.add(device.serialNumber);
     USER_PUBLISH_LEAVES.forEach((leaf) => {
       acl.publish.push(`mnazilona/devices/${device.serialNumber}/${leaf}`);
     });
     USER_SUBSCRIBE_LEAVES.forEach((leaf) => {
       acl.subscribe.push(`mnazilona/devices/${device.serialNumber}/${leaf}`);
+    });
+  });
+
+  // Shared users get publish on user-publish topics only when they have
+  // 'control'; subscribe is granted whenever they have any active share
+  // (control implies view).
+  activeShares.forEach((share) => {
+    if (seen.has(share.serialNumber)) return;
+    seen.add(share.serialNumber);
+
+    const perms = Array.isArray(share.permissions) ? share.permissions : [];
+    const canControl = perms.includes('control');
+
+    if (canControl) {
+      USER_PUBLISH_LEAVES.forEach((leaf) => {
+        acl.publish.push(`mnazilona/devices/${share.serialNumber}/${leaf}`);
+      });
+    }
+    USER_SUBSCRIBE_LEAVES.forEach((leaf) => {
+      acl.subscribe.push(`mnazilona/devices/${share.serialNumber}/${leaf}`);
     });
   });
 
@@ -178,6 +235,7 @@ const mqttAuthWebhook = async (req, res) => {
 module.exports = {
   parseTopic,
   canUserAccessDevice,
+  getUserDeviceAccess,
   canUserPublish,
   canUserSubscribe,
   canDevicePublish,

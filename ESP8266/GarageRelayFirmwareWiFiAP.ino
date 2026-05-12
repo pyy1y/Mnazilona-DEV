@@ -95,7 +95,7 @@ uint32_t      wifiProvisionedAt    = 0;
 // CONFIG - ثوابت غير سرية
 // ═══════════════════════════════════════
 #define DEVICE_NAME       "Garage Relay"
-#define FIRMWARE_VERSION  "1.0.3-shelly"
+#define FIRMWARE_VERSION  "1.0.0"
 
 // هوية الجهاز (السيريال + الـ secret) تُقرأ من LittleFS — تُحرق مرة وحدة
 // أثناء التصنيع. لكل جهاز قيم فريدة. لا تكتبها في الكود أبداً!

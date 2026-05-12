@@ -125,6 +125,21 @@ const deviceValidateSchema = Joi.object({
   serialNumber: Joi.string().required().max(50).pattern(serialNumberPattern),
 });
 
+// ==================== DEVICE SHARING SCHEMAS ====================
+
+const deviceShareInviteSchema = Joi.object({
+  email: Joi.string().email().required().max(255).messages({
+    'string.email': 'Please provide a valid email address',
+    'any.required': 'Email is required',
+  }),
+  permissions: Joi.array()
+    .items(Joi.string().valid('view', 'control'))
+    .min(1)
+    .max(2)
+    .unique()
+    .optional(),
+});
+
 // ==================== ADMIN SCHEMAS ====================
 
 const adminRegisterDeviceSchema = Joi.object({
@@ -205,6 +220,8 @@ module.exports = {
   deviceCommandSchema,
   deviceRenameSchema,
   deviceValidateSchema,
+  // Device sharing
+  deviceShareInviteSchema,
   // Admin
   adminRegisterDeviceSchema,
   adminRegisterBatchSchema,

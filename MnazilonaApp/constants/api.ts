@@ -2,7 +2,7 @@
 // ======================================
 // API Configuration
 // ======================================
-const DEFAULT_DEV_API_URL = 'http://172.20.10.2:3000';
+const DEFAULT_DEV_API_URL = 'http://192.168.8.143:3000';
 const DEFAULT_PROD_API_URL = 'https://mnazilona.xyz/api';
 const isDev = __DEV__;
 
@@ -64,6 +64,15 @@ export const ENDPOINTS = {
     LOGS: (serial: string) => `/devices/${serial}/logs`,
     ALL_LOGS: '/devices/all-logs',
     INQUIRY: '/devices/inquiry',
+    SHARES_LIST: (serial: string) => `/devices/${serial}/shares`,
+    SHARES_INVITE: (serial: string) => `/devices/${serial}/shares`,
+    SHARES_REVOKE: (serial: string, shareId: string) => `/devices/${serial}/shares/${shareId}`,
+  },
+
+  // Device Sharing (invitee-side)
+  SHARES: {
+    ACCEPT: (shareId: string) => `/shares/${shareId}/accept`,
+    REJECT: (shareId: string) => `/shares/${shareId}/reject`,
   },
 
   // Rooms

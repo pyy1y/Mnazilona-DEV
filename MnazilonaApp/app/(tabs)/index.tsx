@@ -56,6 +56,9 @@ type Device = {
   pairedAt?: string;
   deviceType?: string;
   room?: string | null;
+  role?: 'owner' | 'shared';
+  permissions?: string[];
+  sharedBy?: { id?: string; email?: string; name?: string } | null;
   state?: {
     doorState?: 'open' | 'closed';
     relay?: string;
@@ -388,6 +391,16 @@ const getWeatherIcon = (state?: WeatherState) => {
     []
   );
 
+  const handleSharePress = useCallback(
+    (serialNumber: string, deviceName: string) => {
+      router.push({
+        pathname: '/devices/[serialNumber]/share',
+        params: { serialNumber, deviceName },
+      } as any);
+    },
+    [router]
+  );
+
   useFocusEffect(
     useCallback(() => {
       // 1. Hydrate from cache first so the UI is never blank on cold focus.
@@ -461,12 +474,27 @@ const getWeatherIcon = (state?: WeatherState) => {
         setDevices((prev) => prev.filter((d) => d.serialNumber !== data.serialNumber));
       });
 
+      // A device just became visible to this user (they accepted a share).
+      // The full device row isn't on the wire — just refetch the list.
+      const unsubscribeShareAccepted = onSocketEvent('device:share-accepted', () => {
+        loadDevices({ silent: true });
+      });
+
+      // The owner revoked an active share, or unpaired the device entirely.
+      // Drop it from this user's list immediately.
+      const unsubscribeShareRevoked = onSocketEvent('device:share-revoked', (data: any) => {
+        if (!data?.serialNumber) return;
+        setDevices((prev) => prev.filter((d) => d.serialNumber !== data.serialNumber));
+      });
+
       return () => {
         unsubscribeLocalDevices();
         unsubscribeStatus();
         unsubscribeUpdate();
         unsubscribePaired();
         unsubscribeUnpaired();
+        unsubscribeShareAccepted();
+        unsubscribeShareRevoked();
         abortControllerRef.current?.abort();
         stopLocalDiscovery();
       };
@@ -552,12 +580,13 @@ const getWeatherIcon = (state?: WeatherState) => {
         onSendCommand={handleSendCommand}
         onRenameDevice={handleRenameDevice}
         onFetchLogs={fetchDeviceLogs}
+        onSharePress={handleSharePress}
         brandColor={BRAND_COLOR}
         roomName={item.room ? roomMap[item.room] : undefined}
         isLocal={localSerials.has(item.serialNumber)}
       />
     ),
-    [actionLoading, handleSendCommand, handleRenameDevice, fetchDeviceLogs, roomMap, localSerials]
+    [actionLoading, handleSendCommand, handleRenameDevice, fetchDeviceLogs, handleSharePress, roomMap, localSerials]
   );
 
   const renderEmpty = useCallback(

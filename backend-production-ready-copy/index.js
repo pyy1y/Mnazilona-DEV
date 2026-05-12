@@ -14,6 +14,7 @@ const { disconnectRedis, isRedisHealthy } = require('./config/redis');
 const { setupSocket } = require('./config/socket');
 const routes = require('./routes');
 const { startDeviceTimeoutJob, stopDeviceTimeoutJob } = require('./jobs/deviceTimeoutJob');
+const { startDeviceShareExpiryJob, stopDeviceShareExpiryJob } = require('./jobs/deviceShareExpiryJob');
 const { apiLimiter } = require('./middleware/rateLimiter');
 const { ipBlacklistMiddleware } = require('./middleware/ipBlacklist');
 const { trackEndpointAccess } = require('./services/anomalyDetector');
@@ -153,6 +154,7 @@ const gracefulShutdown = async (signal) => {
   logger.info(`${signal} received. Shutting down...`);
   server.close(async () => {
     stopDeviceTimeoutJob();
+    stopDeviceShareExpiryJob();
     await disconnectMQTT();
     await disconnectRedis();
     await disconnectDB();
@@ -172,6 +174,7 @@ const startServer = async () => {
     await connectDB();
     setupMQTT();
     startDeviceTimeoutJob();
+    startDeviceShareExpiryJob();
 
     // HTTPS support: if SSL cert files exist, use HTTPS; otherwise HTTP
     const sslKeyPath = process.env.SSL_KEY_PATH;

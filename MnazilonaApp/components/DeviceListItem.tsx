@@ -27,6 +27,9 @@ type Device = {
   isOnline: boolean;
   deviceType?: string;
   lastSeen?: string;
+  role?: 'owner' | 'shared';
+  permissions?: string[];
+  sharedBy?: { id?: string; email?: string; name?: string } | null;
   state?: {
     doorState?: 'open' | 'closed';
     [key: string]: unknown;
@@ -39,6 +42,7 @@ interface DeviceListItemProps {
   onSendCommand: (serialNumber: string, command: DeviceCommand) => void;
   onRenameDevice?: (serialNumber: string, newName: string) => void;
   onFetchLogs?: (serialNumber: string) => Promise<LogEntry[]>;
+  onSharePress?: (serialNumber: string, deviceName: string) => void;
   brandColor: string;
   roomName?: string;
   isLocal?: boolean;
@@ -123,6 +127,18 @@ const ConnectionBadge = ({ isLocal }: { isLocal: boolean }) => (
 );
 
 // ======================================
+// Shared Badge — shows on cards for devices shared with this user
+// ======================================
+const SharedBadge = ({ ownerLabel }: { ownerLabel?: string }) => (
+  <View style={[styles.connectionBadge, styles.sharedBadge]}>
+    <MaterialCommunityIcons name="account-multiple" size={10} color="#7C3AED" />
+    <Text style={[styles.connectionBadgeText, styles.sharedBadgeText]}>
+      {ownerLabel ? `Shared by ${ownerLabel}` : 'Shared'}
+    </Text>
+  </View>
+);
+
+// ======================================
 // Component
 // ======================================
 function DeviceListItem({
@@ -131,6 +147,7 @@ function DeviceListItem({
   onSendCommand,
   onRenameDevice,
   onFetchLogs,
+  onSharePress,
   brandColor,
   roomName,
   isLocal = false,
@@ -143,6 +160,15 @@ function DeviceListItem({
   const isAC = useMemo(() => isACDevice(device), [device]);
   const isSecurity = useMemo(() => isSecurityDevice(device), [device]);
   const isLock = useMemo(() => isLockDevice(device), [device]);
+
+  const isShared = device.role === 'shared';
+
+  // Owner-only actions: rename and share. Shared users get neither.
+  const renameProp = isShared ? undefined : onRenameDevice;
+  const sharePressHandler = useMemo(() => {
+    if (isShared || !onSharePress) return undefined;
+    return () => onSharePress(device.serialNumber, displayName);
+  }, [isShared, onSharePress, device.serialNumber, displayName]);
 
   const isLoading = useMemo(() => {
     if (!actionLoading) return false;
@@ -170,7 +196,8 @@ function DeviceListItem({
         lockState={(device.state?.lockState as 'locked' | 'unlocked') || null}
         batteryLevel={(device.state?.batteryLevel as number) || null}
         onAction={(_serial, cmd) => onSendCommand(device.serialNumber, { action: cmd.action as any })}
-        onRename={onRenameDevice}
+        onRename={renameProp}
+        onSharePress={sharePressHandler}
         onFetchLogs={onFetchLogs}
         brandColor={brandColor}
         isDemo={true}
@@ -186,7 +213,8 @@ function DeviceListItem({
         isLoading={isLoading}
         securityMode={(device.state?.securityMode as any) || null}
         onAction={(_serial, cmd) => onSendCommand(device.serialNumber, { action: cmd.action as any })}
-        onRename={onRenameDevice}
+        onRename={renameProp}
+        onSharePress={sharePressHandler}
         onFetchLogs={onFetchLogs}
         brandColor={brandColor}
         isDemo={true}
@@ -203,7 +231,8 @@ function DeviceListItem({
         lightState={(device.state?.lightState as 'on' | 'off') || null}
         brightness={(device.state?.brightness as number) || null}
         onAction={(_serial, cmd) => onSendCommand(device.serialNumber, { action: cmd.action as any })}
-        onRename={onRenameDevice}
+        onRename={renameProp}
+        onSharePress={sharePressHandler}
         onFetchLogs={onFetchLogs}
         brandColor={brandColor}
         isDemo={true}
@@ -219,7 +248,8 @@ function DeviceListItem({
         isLoading={isLoading}
         lightState={(device.state?.lightState as 'on' | 'off') || null}
         onAction={(_serial, cmd) => onSendCommand(device.serialNumber, { action: cmd.action as any })}
-        onRename={onRenameDevice}
+        onRename={renameProp}
+        onSharePress={sharePressHandler}
         onFetchLogs={onFetchLogs}
         brandColor={brandColor}
         isDemo={true}
@@ -240,7 +270,8 @@ function DeviceListItem({
         swingMode={(device.state?.swingMode as any) || null}
         presetMode={(device.state?.presetMode as any) || null}
         onAction={(_serial, cmd) => onSendCommand(device.serialNumber, { action: cmd.action as any })}
-        onRename={onRenameDevice}
+        onRename={renameProp}
+        onSharePress={sharePressHandler}
         onFetchLogs={onFetchLogs}
         brandColor={brandColor}
         isDemo={true}
@@ -255,7 +286,8 @@ function DeviceListItem({
         isOnline={device.isOnline}
         isLoading={isLoading}
         waterLevel={(device.state?.waterLevel as number) || null}
-        onRename={onRenameDevice}
+        onRename={renameProp}
+        onSharePress={sharePressHandler}
         onFetchLogs={onFetchLogs}
         brandColor={brandColor}
         isDemo={true}
@@ -271,7 +303,8 @@ function DeviceListItem({
         isLoading={isLoading}
         doorState={device.state?.doorState || null}
         onAction={(_serial, cmd) => handleCommand(cmd)}
-        onRename={onRenameDevice}
+        onRename={renameProp}
+        onSharePress={sharePressHandler}
         onFetchLogs={onFetchLogs}
         brandColor={brandColor}
       />
@@ -291,10 +324,15 @@ function DeviceListItem({
     );
   }
 
+  const ownerLabel = device.sharedBy?.name || device.sharedBy?.email || undefined;
+
   return (
     <View>
       <View style={styles.metaRow}>
-        {roomName ? <RoomLabel name={roomName} /> : null}
+        <View style={styles.metaLeft}>
+          {roomName ? <RoomLabel name={roomName} /> : null}
+          {isShared ? <SharedBadge ownerLabel={ownerLabel} /> : null}
+        </View>
         {device.isOnline ? <ConnectionBadge isLocal={isLocal} /> : null}
       </View>
       {card}
@@ -307,11 +345,13 @@ export default memo(DeviceListItem, (prevProps, nextProps) => {
     prevProps.device.serialNumber === nextProps.device.serialNumber &&
     prevProps.device.isOnline === nextProps.device.isOnline &&
     prevProps.device.name === nextProps.device.name &&
+    prevProps.device.role === nextProps.device.role &&
     prevProps.device.state?.doorState === nextProps.device.state?.doorState &&
     prevProps.actionLoading === nextProps.actionLoading &&
     prevProps.brandColor === nextProps.brandColor &&
     prevProps.roomName === nextProps.roomName &&
-    prevProps.isLocal === nextProps.isLocal
+    prevProps.isLocal === nextProps.isLocal &&
+    prevProps.onSharePress === nextProps.onSharePress
   );
 });
 
@@ -383,6 +423,13 @@ const styles = StyleSheet.create({
     marginBottom: 6,
     marginHorizontal: 4,
   },
+  metaLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 6,
+    flexShrink: 1,
+  },
   connectionBadge: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -406,5 +453,11 @@ const styles = StyleSheet.create({
   },
   cloudBadgeText: {
     color: '#6B7280',
+  },
+  sharedBadge: {
+    backgroundColor: '#EDE9FE',
+  },
+  sharedBadgeText: {
+    color: '#7C3AED',
   },
 });

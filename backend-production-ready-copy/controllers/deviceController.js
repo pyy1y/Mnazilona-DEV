@@ -7,6 +7,7 @@ const DeviceLog = require('../models/DeviceLog');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
 const Firmware = require('../models/Firmware');
+const DeviceShare = require('../models/DeviceShare');
 const { topicOf, publishMessage, MQTT_PUBLIC_HOST, MQTT_PUBLIC_PORT, invalidateDeviceMeta } = require('../config/mqtt');
 const { emitToUser, emitToAdminDevicesView } = require('../config/socket');
 const { canUserAccessDevice, getDeviceACL } = require('../services/mqttAclService');
@@ -347,6 +348,36 @@ exports.unpair = async (req, res) => {
 
     await DeviceLog.deleteMany({ serialNumber: cleanSerial });
 
+    // Drop any active or pending shares for this device so previously-shared
+    // users immediately lose access (REST checks query DeviceShare live).
+    // Notify each formerly-shared user before deletion so they know why their
+    // device disappeared.
+    const sharesToNotify = await DeviceShare.find({
+      device: device._id,
+      status: { $in: ['pending', 'active'] },
+    }).select('sharedWith status').lean();
+
+    await DeviceShare.deleteMany({ device: device._id });
+
+    for (const s of sharesToNotify) {
+      try {
+        const notif = await Notification.create({
+          recipient: s.sharedWith,
+          type: 'share_revoked',
+          message: `Your access to "${device.name || cleanSerial}" was removed because the owner unpaired the device.`,
+          data: {
+            serialNumber: cleanSerial,
+            deviceName: device.name || cleanSerial,
+            ownerId: previousOwner,
+          },
+        });
+        emitToUser(s.sharedWith, 'notification:new', notif);
+        emitToUser(s.sharedWith, 'device:share-revoked', { serialNumber: cleanSerial });
+      } catch (notifErr) {
+        console.error('Cascade share-revoked notification failed:', notifErr.message);
+      }
+    }
+
     await AllowedDevice.findOneAndUpdate(
       { serialNumber: cleanSerial },
       { activatedBy: null }
@@ -387,14 +418,55 @@ exports.unpair = async (req, res) => {
 };
 
 // ============================================================
-// getAll - List all user devices
+// getAll - List devices visible to the user (owned + actively shared)
 // ============================================================
+const DEVICE_LIST_FIELDS = 'name serialNumber macAddress deviceType isOnline lastSeen pairedAt warrantyStartDate state room';
+
 exports.getAll = async (req, res) => {
   try {
-    const devices = await Device.find({ owner: req.user.id })
-      .select('name serialNumber macAddress deviceType isOnline lastSeen pairedAt warrantyStartDate state room')
-      .sort({ pairedAt: -1 })
-      .lean();
+    const userId = req.user.id;
+
+    const [ownedDevices, activeShares] = await Promise.all([
+      Device.find({ owner: userId })
+        .select(DEVICE_LIST_FIELDS)
+        .sort({ pairedAt: -1 })
+        .lean(),
+      DeviceShare.find({ sharedWith: userId, status: 'active' })
+        .populate({ path: 'device', select: `${DEVICE_LIST_FIELDS} owner` })
+        .populate({ path: 'owner', select: 'email name' })
+        .sort({ createdAt: -1 })
+        .lean(),
+    ]);
+
+    const owned = ownedDevices.map((d) => ({
+      ...d,
+      role: 'owner',
+      permissions: ['view', 'control'],
+    }));
+
+    const shared = activeShares
+      .filter((s) => s.device) // drop shares whose device was deleted
+      .map((s) => {
+        const { owner: deviceOwner, ...deviceFields } = s.device;
+        return {
+          ...deviceFields,
+          role: 'shared',
+          permissions: s.permissions,
+          shareId: s._id,
+          sharedBy: s.owner
+            ? { id: s.owner._id, email: s.owner.email, name: s.owner.name }
+            : null,
+        };
+      });
+
+    // Defense-in-depth: dedupe by serialNumber, keeping the owned entry
+    // first if a user somehow appears as both owner and shared user.
+    const seen = new Set();
+    const devices = [...owned, ...shared].filter((d) => {
+      if (seen.has(d.serialNumber)) return false;
+      seen.add(d.serialNumber);
+      return true;
+    });
 
     res.json({ count: devices.length, devices });
   } catch (error) {
@@ -404,7 +476,7 @@ exports.getAll = async (req, res) => {
 };
 
 // ============================================================
-// getOne - Get single device
+// getOne - Get single device (access pre-checked by requireDeviceAccess('view'))
 // ============================================================
 exports.getOne = async (req, res) => {
   try {
@@ -412,11 +484,13 @@ exports.getOne = async (req, res) => {
     if (!serialNumber) return res.status(400).json({ message: 'Serial number is required' });
 
     const cleanSerial = serialNumber.trim().toUpperCase();
-    const device = await Device.findOne({ serialNumber: cleanSerial, owner: req.user.id }).lean();
+    const device = await Device.findOne({ serialNumber: cleanSerial }).lean();
+    if (!device) return res.status(404).json({ message: 'Device not found' });
 
-    if (!device) return res.status(404).json({ message: 'Device not found or not owned by you' });
-
-    res.json(sanitizeDeviceResponse(device));
+    res.json({
+      ...sanitizeDeviceResponse(device),
+      role: req.deviceRole,
+    });
   } catch (error) {
     console.error('Get device error:', error.message);
     res.status(500).json({ message: 'Failed to fetch device' });
@@ -459,9 +533,9 @@ exports.sendCommand = async (req, res) => {
       return res.status(cachedResponse.status).json(cachedResponse.body);
     }
 
-    const device = await Device.findOne({ serialNumber: cleanSerial, owner: userId })
-      .select('+mqttToken');
-    if (!device) return res.status(404).json({ message: 'Device not found or not owned by you' });
+    // Access pre-checked by requireDeviceAccess('control'); fetch with hidden mqttToken.
+    const device = await Device.findOne({ serialNumber: cleanSerial }).select('+mqttToken');
+    if (!device) return res.status(404).json({ message: 'Device not found' });
     if (device.adminLocked) return res.status(423).json({ message: 'Device is locked by admin. Contact support.' });
     if (!device.isOnline) return res.status(503).json({ message: 'Device is offline' });
     if (!device.mqttToken) return res.status(503).json({ message: 'Device command channel is not ready' });
@@ -625,12 +699,11 @@ exports.renameDevice = async (req, res) => {
 };
 
 // ============================================================
-// getLogs - Get device logs with pagination
+// getLogs - Get device logs (access pre-checked by requireDeviceAccess('view'))
 // ============================================================
 exports.getLogs = async (req, res) => {
   try {
     const { serialNumber } = req.params;
-    const userId = req.user.id;
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
     const page = Math.max(parseInt(req.query.page) || 1, 1);
     const skip = (page - 1) * limit;
@@ -638,9 +711,6 @@ exports.getLogs = async (req, res) => {
     if (!serialNumber) return res.status(400).json({ message: 'Serial number is required' });
 
     const cleanSerial = serialNumber.trim().toUpperCase();
-
-    const device = await Device.findOne({ serialNumber: cleanSerial, owner: userId });
-    if (!device) return res.status(404).json({ message: 'Device not found or not owned by you' });
 
     const [logs, total] = await Promise.all([
       DeviceLog.find({ serialNumber: cleanSerial })
@@ -669,7 +739,7 @@ exports.getLogs = async (req, res) => {
 };
 
 // ============================================================
-// getAllLogs - Get all logs from all user devices
+// getAllLogs - Get all logs across user-visible devices (owned + actively shared)
 // ============================================================
 exports.getAllLogs = async (req, res) => {
   try {
@@ -678,14 +748,25 @@ exports.getAllLogs = async (req, res) => {
     const page = Math.max(parseInt(req.query.page) || 1, 1);
     const skip = (page - 1) * limit;
 
-    const userDevices = await Device.find({ owner: userId }).select('serialNumber name').lean();
-    if (!userDevices.length) {
+    const [ownedDevices, activeShares] = await Promise.all([
+      Device.find({ owner: userId }).select('serialNumber name').lean(),
+      DeviceShare.find({ sharedWith: userId, status: 'active' })
+        .populate({ path: 'device', select: 'serialNumber name' })
+        .lean(),
+    ]);
+
+    const deviceNames = {};
+    ownedDevices.forEach((d) => { deviceNames[d.serialNumber] = d.name; });
+    activeShares.forEach((s) => {
+      if (s.device && !deviceNames[s.device.serialNumber]) {
+        deviceNames[s.device.serialNumber] = s.device.name;
+      }
+    });
+
+    const serialNumbers = Object.keys(deviceNames);
+    if (!serialNumbers.length) {
       return res.json({ logs: [], total: 0, page: 1, pages: 0 });
     }
-
-    const serialNumbers = userDevices.map((d) => d.serialNumber);
-    const deviceNames = {};
-    userDevices.forEach((d) => { deviceNames[d.serialNumber] = d.name; });
 
     const [logs, total] = await Promise.all([
       DeviceLog.find({ serialNumber: { $in: serialNumbers } })

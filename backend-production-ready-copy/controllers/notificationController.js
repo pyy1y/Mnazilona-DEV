@@ -2,7 +2,9 @@ const Notification = require('../models/Notification');
 const Device = require('../models/Device');
 const AllowedDevice = require('../models/AllowedDevice');
 const DeviceLog = require('../models/DeviceLog');
+const DeviceShare = require('../models/DeviceShare');
 const { topicOf, publishMessage } = require('../config/mqtt');
+const { emitToUser } = require('../config/socket');
 
 // ============================================================
 // getAll
@@ -123,6 +125,35 @@ exports.respondToTransfer = async (req, res) => {
       await device.save();
 
       await DeviceLog.deleteMany({ serialNumber });
+
+      // Drop any shares for this device — ownership is being released, so
+      // previously-shared users should lose access immediately. Notify each
+      // formerly-shared user before deletion.
+      const sharesToNotify = await DeviceShare.find({
+        device: device._id,
+        status: { $in: ['pending', 'active'] },
+      }).select('sharedWith').lean();
+
+      await DeviceShare.deleteMany({ device: device._id });
+
+      for (const s of sharesToNotify) {
+        try {
+          const cascadeNotif = await Notification.create({
+            recipient: s.sharedWith,
+            type: 'share_revoked',
+            message: `Your access to "${deviceName || serialNumber}" was removed because ownership of the device was released.`,
+            data: {
+              serialNumber,
+              deviceName: deviceName || serialNumber,
+              ownerId: userId,
+            },
+          });
+          emitToUser(s.sharedWith, 'notification:new', cascadeNotif);
+          emitToUser(s.sharedWith, 'device:share-revoked', { serialNumber });
+        } catch (notifErr) {
+          console.error('Cascade share-revoked notification failed:', notifErr.message);
+        }
+      }
 
       await AllowedDevice.findOneAndUpdate(
         { serialNumber },

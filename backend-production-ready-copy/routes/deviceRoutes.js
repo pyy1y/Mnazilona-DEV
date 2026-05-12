@@ -1,10 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const deviceController = require('../controllers/deviceController');
+const deviceShareController = require('../controllers/deviceShareController');
 const auth = require('../middleware/auth');
 const { deviceInquiryLimiter, apiLimiter } = require('../middleware/rateLimiter');
 const { enforceDeviceOwnership, mqttAuthWebhook } = require('../services/mqttAclService');
-const { validate, deviceInquirySchema, devicePairSchema, deviceUnpairSchema, deviceCommandSchema, deviceRenameSchema, deviceValidateSchema } = require('../middleware/validate');
+const { requireDeviceAccess } = require('../middleware/deviceAccess');
+const { validate, deviceInquirySchema, devicePairSchema, deviceUnpairSchema, deviceCommandSchema, deviceRenameSchema, deviceValidateSchema, deviceShareInviteSchema } = require('../middleware/validate');
 
 // Device Setup (ESP32 calls this)
 router.post('/inquiry', deviceInquiryLimiter, validate(deviceInquirySchema), deviceController.inquiry);
@@ -19,12 +21,17 @@ router.post('/unpair', auth, apiLimiter, validate(deviceUnpairSchema), deviceCon
 // Device Management
 router.get('/', auth, deviceController.getAll);
 router.get('/all-logs', auth, deviceController.getAllLogs);
-router.get('/:serialNumber', auth, deviceController.getOne);
+router.get('/:serialNumber', auth, requireDeviceAccess('view'), deviceController.getOne);
 router.patch('/:serialNumber/rename', auth, apiLimiter, enforceDeviceOwnership, validate(deviceRenameSchema), deviceController.renameDevice);
-router.get('/:serialNumber/logs', auth, deviceController.getLogs);
+router.get('/:serialNumber/logs', auth, requireDeviceAccess('view'), deviceController.getLogs);
 
-// Device Commands (with ACL enforcement)
-router.post('/:serialNumber/command', auth, apiLimiter, enforceDeviceOwnership, validate(deviceCommandSchema), deviceController.sendCommand);
+// Device Commands (owner OR shared user with 'control')
+router.post('/:serialNumber/command', auth, apiLimiter, requireDeviceAccess('control'), validate(deviceCommandSchema), deviceController.sendCommand);
+
+// Device Sharing (owner-side)
+router.post('/:serialNumber/shares', auth, apiLimiter, enforceDeviceOwnership, validate(deviceShareInviteSchema), deviceShareController.invite);
+router.get('/:serialNumber/shares', auth, enforceDeviceOwnership, deviceShareController.list);
+router.delete('/:serialNumber/shares/:shareId', auth, apiLimiter, enforceDeviceOwnership, deviceShareController.revoke);
 
 // OTA Endpoints (called by ESP32 devices - authenticated via device headers)
 router.get('/ota/check', deviceInquiryLimiter, deviceController.otaCheck);

@@ -16,6 +16,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { api, isAuthError } from "../utils/api";
 import { useAuth } from "../hooks/useAuth";
 import { ENDPOINTS } from "../constants/api";
+import { connectSocket, onSocketEvent } from "../utils/socket";
 
 const BRAND = "#2E5B8E";
 
@@ -24,11 +25,27 @@ type NotificationData = {
   deviceName?: string;
   requesterId?: string;
   requesterEmail?: string;
+  shareId?: string;
+  ownerId?: string;
+  ownerEmail?: string;
+  ownerName?: string;
+  sharedWithId?: string;
+  sharedWithEmail?: string;
 };
+
+type NotificationType =
+  | "transfer_request"
+  | "transfer_approved"
+  | "transfer_denied"
+  | "info"
+  | "share_request"
+  | "share_accepted"
+  | "share_rejected"
+  | "share_revoked";
 
 type NotificationItem = {
   _id: string;
-  type: "transfer_request" | "transfer_approved" | "transfer_denied" | "info";
+  type: NotificationType;
   message: string;
   data: NotificationData;
   isRead: boolean;
@@ -73,6 +90,23 @@ export default function NotificationsScreen() {
     loadNotifications();
   }, [loadNotifications]);
 
+  // Live updates: any new notification (share request, share response, etc.)
+  // pushed by the backend triggers a refetch so the user doesn't have to
+  // pull-to-refresh.
+  useEffect(() => {
+    connectSocket().catch(() => {});
+    const unsubNew = onSocketEvent("notification:new", () => {
+      loadNotifications();
+    });
+    const unsubExpired = onSocketEvent("share:expired", () => {
+      loadNotifications();
+    });
+    return () => {
+      unsubNew();
+      unsubExpired();
+    };
+  }, [loadNotifications]);
+
   const handleRefresh = useCallback(() => {
     setRefreshing(true);
     loadNotifications();
@@ -96,6 +130,51 @@ export default function NotificationsScreen() {
       // silent
     }
   }, [handleAuthError]);
+
+  const respondToShare = useCallback(
+    async (notificationId: string, shareId: string, action: "accept" | "reject") => {
+      const verb = action === "accept" ? "accept" : "reject";
+      setRespondingId(notificationId);
+      try {
+        const endpoint =
+          action === "accept"
+            ? ENDPOINTS.SHARES.ACCEPT(shareId)
+            : ENDPOINTS.SHARES.REJECT(shareId);
+        const response = await api.post<any>(endpoint, undefined, { requireAuth: true });
+
+        if (!response.success) {
+          if (isAuthError(response.status)) {
+            await handleAuthError(response.status);
+            return;
+          }
+          const code = response.data?.code;
+          const fallback = response.message || `Failed to ${verb} invitation.`;
+          const msg =
+            code === "SHARE_NO_LONGER_AVAILABLE"
+              ? "This invitation is no longer available."
+              : code === "SHARE_NOT_FOUND"
+              ? "Invitation not found."
+              : fallback;
+          Alert.alert("Error", msg);
+          loadNotifications();
+          return;
+        }
+
+        Alert.alert(
+          "Done",
+          action === "accept"
+            ? "Invitation accepted. The device will appear in your list."
+            : "Invitation declined."
+        );
+        loadNotifications();
+      } catch {
+        Alert.alert("Error", "Something went wrong. Try again.");
+      } finally {
+        setRespondingId(null);
+      }
+    },
+    [handleAuthError, loadNotifications]
+  );
 
   const respondToTransfer = useCallback(
     async (notificationId: string, action: "approve" | "deny") => {
@@ -157,6 +236,14 @@ export default function NotificationsScreen() {
         return "check-circle";
       case "transfer_denied":
         return "close-circle";
+      case "share_request":
+        return "share-variant";
+      case "share_accepted":
+        return "check-circle";
+      case "share_rejected":
+        return "close-circle";
+      case "share_revoked":
+        return "account-cancel";
       default:
         return "bell";
     }
@@ -165,10 +252,14 @@ export default function NotificationsScreen() {
   const getNotificationColor = (type: string) => {
     switch (type) {
       case "transfer_request":
+      case "share_request":
         return "#FF9800";
       case "transfer_approved":
+      case "share_accepted":
         return "#4CAF50";
       case "transfer_denied":
+      case "share_rejected":
+      case "share_revoked":
         return "#F44336";
       default:
         return BRAND;
@@ -193,6 +284,8 @@ export default function NotificationsScreen() {
   const renderItem = useCallback(
     ({ item }: { item: NotificationItem }) => {
       const isTransferRequest = item.type === "transfer_request" && item.status === "pending";
+      const isShareRequest =
+        item.type === "share_request" && item.status === "pending" && !!item.data?.shareId;
       const isResponding = respondingId === item._id;
 
       return (
@@ -231,6 +324,16 @@ export default function NotificationsScreen() {
             </View>
           )}
 
+          {/* Owner info on incoming share requests */}
+          {item.type === "share_request" && (item.data?.ownerName || item.data?.ownerEmail) && (
+            <View style={styles.deviceInfo}>
+              <MaterialCommunityIcons name="account" size={14} color="#999" />
+              <Text style={styles.deviceInfoText}>
+                from {item.data.ownerName || item.data.ownerEmail}
+              </Text>
+            </View>
+          )}
+
           {/* Status badge for responded requests */}
           {item.type === "transfer_request" && item.status !== "pending" && (
             <View style={[
@@ -243,6 +346,40 @@ export default function NotificationsScreen() {
               ]}>
                 {item.status === "approved" ? "Approved" : "Denied"}
               </Text>
+            </View>
+          )}
+
+          {/* Action buttons for pending share requests */}
+          {isShareRequest && (
+            <View style={styles.actionRow}>
+              <TouchableOpacity
+                style={[styles.actionBtn, styles.denyBtn]}
+                onPress={() => respondToShare(item._id, item.data!.shareId!, "reject")}
+                disabled={isResponding}
+              >
+                {isResponding ? (
+                  <ActivityIndicator size="small" color="#F44336" />
+                ) : (
+                  <>
+                    <MaterialCommunityIcons name="close" size={18} color="#F44336" />
+                    <Text style={styles.denyText}>Decline</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.actionBtn, styles.approveBtn]}
+                onPress={() => respondToShare(item._id, item.data!.shareId!, "accept")}
+                disabled={isResponding}
+              >
+                {isResponding ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <>
+                    <MaterialCommunityIcons name="check" size={18} color="#fff" />
+                    <Text style={styles.approveText}>Accept</Text>
+                  </>
+                )}
+              </TouchableOpacity>
             </View>
           )}
 
@@ -283,7 +420,7 @@ export default function NotificationsScreen() {
         </View>
       );
     },
-    [respondingId, respondToTransfer]
+    [respondingId, respondToTransfer, respondToShare]
   );
 
   const renderEmpty = useCallback(

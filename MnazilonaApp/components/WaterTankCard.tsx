@@ -35,6 +35,7 @@ interface WaterTankCardProps {
   waterLevel?: number | null; // 0–100
   onRename?: (serialNumber: string, newName: string) => void;
   onFetchLogs?: (serialNumber: string) => Promise<LogEntry[]>;
+  onSharePress?: () => void;
   brandColor: string;
   isDemo?: boolean;
   onlineText?: string;
@@ -63,6 +64,7 @@ function WaterTankCard({
   waterLevel,
   onRename,
   onFetchLogs,
+  onSharePress,
   brandColor,
   isDemo = false,
   onlineText = 'ONLINE',
@@ -206,6 +208,15 @@ function WaterTankCard({
               <TouchableOpacity style={styles.menuItem} onPress={handleOpenLogs}>
                 <MaterialCommunityIcons name="text-box-outline" size={22} color="#333" />
                 <Text style={styles.menuItemText}>Device Logs</Text>
+              </TouchableOpacity>
+            )}
+            {onSharePress && (
+              <TouchableOpacity
+                style={styles.menuItem}
+                onPress={() => { closeModal(); onSharePress(); }}
+              >
+                <MaterialCommunityIcons name="share-variant" size={22} color="#333" />
+                <Text style={styles.menuItemText}>Share Device</Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity style={styles.cancelBtn} onPress={closeModal}>

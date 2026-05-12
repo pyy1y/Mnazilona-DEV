@@ -7,6 +7,7 @@ const apiRoutes = require('./apiRoutes');
 const notificationRoutes = require('./notificationRoutes');
 const roomRoutes = require('./roomRoutes');
 const adminRoutes = require('./adminRoutes');
+const shareRoutes = require('./shareRoutes');
 
 // API v1 routes
 const v1 = express.Router();
@@ -16,6 +17,7 @@ v1.use('/api', apiRoutes);
 v1.use('/notifications', notificationRoutes);
 v1.use('/rooms', roomRoutes);
 v1.use('/admin', adminRoutes);
+v1.use('/shares', shareRoutes);
 
 router.use('/v1', v1);
 
@@ -26,6 +28,7 @@ router.use('/api', apiRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/rooms', roomRoutes);
 router.use('/admin', adminRoutes);
+router.use('/shares', shareRoutes);
 
 router.get('/', (req, res) => {
   res.json({
