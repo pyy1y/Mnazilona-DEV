@@ -705,14 +705,17 @@ int extractPort(const String& url, int defaultPort = 8883) {
 int inquireServer() {
   if (WiFi.status() != WL_CONNECTED) return INQUIRY_FAIL;
 
-  Serial.println("[Server] Sending inquiry...");
+  Serial.printf("[Server] Sending inquiry... (heap=%u)\n", ESP.getFreeHeap());
   HTTPClient http;
 
   String inquiryUrl = String(SERVER_BASE_URL) + SERVER_INQUIRY_PATH;
   bool isHttps = inquiryUrl.startsWith("https://");
   bool ok = isHttps ? http.begin(wifiSecureClient, inquiryUrl)
                     : http.begin(wifiPlainClient,  inquiryUrl);
-  if (!ok) return INQUIRY_FAIL;
+  if (!ok) {
+    Serial.println("[Server] http.begin failed");
+    return INQUIRY_FAIL;
+  }
 
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(10000);
@@ -771,7 +774,8 @@ int inquireServer() {
       Serial.println("[Server] Failed to parse JSON response");
     }
   } else {
-    Serial.printf("[Server] Inquiry failed: HTTP %d\n", code);
+    Serial.printf("[Server] Inquiry failed: HTTP %d (%s) heap=%u\n",
+                  code, HTTPClient::errorToString(code).c_str(), ESP.getFreeHeap());
     if (code > 0) Serial.println(http.getString());
   }
   http.end();
@@ -2256,6 +2260,10 @@ void setup() {
     wifiSecureClient.setInsecure();
     Serial.println("[TLS] WARNING: insecure mode (dev only!)");
   }
+  // BearSSL default is 16KB/16KB which exhausts ESP8266 heap during handshake.
+  // 1024 RX / 512 TX is the sweet spot for ESP8266: enough for Let's Encrypt
+  // cert chain without MFLN negotiation, but small enough to leave ~30KB heap.
+  wifiSecureClient.setBufferSizes(1024, 512);
 
   WiFi.mode(WIFI_STA);
   String macAddr = WiFi.macAddress();
