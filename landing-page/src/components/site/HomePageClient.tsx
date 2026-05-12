@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
   Bell,
@@ -12,7 +13,8 @@ import {
   Sparkles,
   Zap,
 } from "lucide-react";
-import { APP_NAME } from "@/config/site";
+import { APP_NAME, siteConfig } from "@/config/site";
+import { fetchWebsiteSettings, localizedValue, type WebsiteSettings } from "@/lib/websiteSettings";
 import DownloadBadges from "./DownloadBadges";
 import SiteFooter from "./SiteFooter";
 import SiteHeader from "./SiteHeader";
@@ -114,6 +116,33 @@ const homeContent = {
 export default function HomePageClient() {
   const { language, setLanguage, isRtl, textAlign } = useSiteLanguage();
   const t = homeContent[language];
+  const [websiteSettings, setWebsiteSettings] = useState<WebsiteSettings | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchWebsiteSettings(controller.signal).then(setWebsiteSettings);
+    return () => controller.abort();
+  }, []);
+
+  const heroContent = useMemo(() => ({
+    eyebrow: localizedValue(websiteSettings?.hero?.badge, language, t.hero.eyebrow),
+    title: localizedValue(websiteSettings?.hero?.title, language, t.hero.title),
+    description: localizedValue(websiteSettings?.hero?.description, language, t.hero.description),
+    ctaText: localizedValue(websiteSettings?.hero?.ctaText, language, t.hero.features),
+    appStoreUrl: websiteSettings?.hero?.appStoreUrl || siteConfig.appStoreUrl,
+    googlePlayUrl: websiteSettings?.hero?.googlePlayUrl || siteConfig.googlePlayUrl,
+  }), [language, t.hero.description, t.hero.eyebrow, t.hero.features, t.hero.title, websiteSettings]);
+
+  const downloadLinks = useMemo(() => ({
+    appStoreUrl: websiteSettings?.download?.appStoreUrl || heroContent.appStoreUrl,
+    googlePlayUrl: websiteSettings?.download?.googlePlayUrl || heroContent.googlePlayUrl,
+  }), [heroContent.appStoreUrl, heroContent.googlePlayUrl, websiteSettings]);
+
+  const aboutContent = useMemo(() => ({
+    eyebrow: localizedValue(websiteSettings?.about?.label, language, t.about.eyebrow),
+    title: localizedValue(websiteSettings?.about?.title, language, t.about.title),
+    description: localizedValue(websiteSettings?.about?.description, language, t.about.description),
+  }), [language, t.about.description, t.about.eyebrow, t.about.title, websiteSettings]);
 
   return (
     <main dir={t.dir} lang={language} className="min-h-screen bg-[#071A3D] text-slate-950">
@@ -125,16 +154,16 @@ export default function HomePageClient() {
           <div className={`animate-section-in ${textAlign}`}>
             <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-blue-300/25 bg-white/10 px-4 py-2 text-sm font-semibold text-blue-100 shadow-sm shadow-blue-950/20 backdrop-blur">
               <Sparkles size={16} />
-              {t.hero.eyebrow}
+              {heroContent.eyebrow}
             </div>
             <h1 className="max-w-3xl bg-gradient-to-r from-white via-blue-100 to-[#4F7DFF] bg-clip-text text-5xl font-bold leading-tight tracking-normal text-transparent sm:text-6xl lg:text-7xl">
-              {t.hero.title}
+              {heroContent.title}
             </h1>
-            <p className="mt-6 max-w-2xl text-lg leading-8 text-blue-100/85 sm:text-xl">{t.hero.description}</p>
+            <p className="mt-6 max-w-2xl text-lg leading-8 text-blue-100/85 sm:text-xl">{heroContent.description}</p>
             <div className="animate-download-badges mt-9 flex flex-col gap-4 sm:flex-row">
-              <DownloadBadges />
+              <DownloadBadges appStoreUrl={heroContent.appStoreUrl} googlePlayUrl={heroContent.googlePlayUrl} />
               <a href="#features" className="inline-flex w-fit items-center justify-center gap-2 rounded-full border border-blue-300/30 bg-white/10 px-6 py-3.5 text-sm font-bold text-white shadow-sm shadow-blue-950/20 backdrop-blur transition duration-300 hover:-translate-y-1 hover:scale-[1.02] hover:border-blue-300/60 hover:bg-white/15 hover:shadow-lg hover:shadow-blue-500/20">
-                {t.hero.features}
+                {heroContent.ctaText}
                 <ArrowRight size={18} className={isRtl ? "rotate-180" : ""} />
               </a>
             </div>
@@ -180,9 +209,9 @@ export default function HomePageClient() {
       <section id="about" className="animate-section-in bg-white py-20">
         <div className="mx-auto max-w-7xl px-5 sm:px-6 lg:px-8">
           <div className={`max-w-3xl ${textAlign}`}>
-            <p className="text-sm font-bold uppercase tracking-[0.18em] text-cyan-600">{t.about.eyebrow}</p>
-            <h2 className="mt-4 text-3xl font-bold tracking-normal text-[#061a4f] sm:text-4xl">{t.about.title}</h2>
-            <p className="mt-5 text-lg leading-8 text-slate-600">{t.about.description}</p>
+            <p className="text-sm font-bold uppercase tracking-[0.18em] text-cyan-600">{aboutContent.eyebrow}</p>
+            <h2 className="mt-4 text-3xl font-bold tracking-normal text-[#061a4f] sm:text-4xl">{aboutContent.title}</h2>
+            <p className="mt-5 text-lg leading-8 text-slate-600">{aboutContent.description}</p>
           </div>
         </div>
       </section>
@@ -238,7 +267,7 @@ export default function HomePageClient() {
               <h2 className="mt-4 text-3xl font-bold tracking-normal sm:text-4xl">{t.download.title}</h2>
               <p className="mt-4 max-w-2xl leading-7 text-blue-100">{t.download.description}</p>
             </div>
-            <DownloadBadges />
+            <DownloadBadges appStoreUrl={downloadLinks.appStoreUrl} googlePlayUrl={downloadLinks.googlePlayUrl} />
           </div>
         </div>
       </section>
