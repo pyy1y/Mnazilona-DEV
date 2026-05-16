@@ -3,6 +3,7 @@ const User = require('../models/User');
 const { sendVerificationCode, verifyCode } = require('../services/codeService');
 const { normalizeEmail, strongPassword, sanitizeString, generateToken, generateRefreshToken, sanitizeUserResponse, REFRESH_TOKEN_EXPIRY_MS } = require('../utils/helpers');
 const { trackFailedLogin, trackFailedOtp } = require('../services/anomalyDetector');
+const logger = require('../utils/logger');
 
 const BCRYPT_ROUNDS = 12;
 
@@ -59,6 +60,7 @@ exports.registerVerifyCode = async (req, res) => {
     });
 
     await user.save();
+    logger.info('New user registered', { email, ip: req.ip, userId: user._id });
     res.status(201).json({ message: 'Registration successful', userId: user._id });
   } catch (error) {
     console.error('Register verify code error:', error.message);
@@ -87,10 +89,12 @@ exports.loginSendCode = async (req, res) => {
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       trackFailedLogin(req.ip);
+      logger.warn('Failed login attempt - wrong password', { email, ip: req.ip });
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
     await sendVerificationCode(email, 'login');
+    logger.info('Login OTP sent', { email, ip: req.ip });
     res.json({ message: 'Verification code sent' });
   } catch (error) {
     console.error('Login send code error:', error.message);
@@ -108,6 +112,7 @@ exports.loginVerifyCode = async (req, res) => {
     const isValidCode = await verifyCode(email, 'login', code);
     if (!isValidCode) {
       trackFailedOtp(req.ip, email);
+      logger.warn('Failed OTP attempt', { email, ip: req.ip });
       return res.status(400).json({ message: 'Invalid or expired verification code' });
     }
 
@@ -124,6 +129,7 @@ exports.loginVerifyCode = async (req, res) => {
     await user.save();
 
     const token = generateToken(user);
+    logger.info('User logged in successfully', { email, ip: req.ip, userId: user._id });
     res.json({ message: 'Login successful', token, refreshToken: user.refreshToken, user: sanitizeUserResponse(user) });
   } catch (error) {
     console.error('Login verify code error:', error.message);
@@ -141,6 +147,7 @@ exports.forgotPassword = async (req, res) => {
     if (!user) return res.json({ message: 'If the email exists, a reset code has been sent' });
 
     await sendVerificationCode(email, 'reset_password');
+    logger.info('Password reset requested', { email, ip: req.ip });
     res.json({ message: 'If the email exists, a reset code has been sent' });
   } catch (error) {
     console.error('Forgot password error:', error.message);
@@ -174,6 +181,7 @@ exports.resetPassword = async (req, res) => {
     );
     if (!user) return res.status(404).json({ message: 'User not found' });
 
+    logger.info('Password reset successful', { email, ip: req.ip });
     res.json({ message: 'Password reset successful' });
   } catch (error) {
     console.error('Reset password error:', error.message);
@@ -200,7 +208,10 @@ exports.changePassword = async (req, res) => {
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     const isPasswordValid = await bcrypt.compare(oldPassword, user.password);
-    if (!isPasswordValid) return res.status(401).json({ message: 'Current password is incorrect' });
+    if (!isPasswordValid) {
+      logger.warn('Failed password change - wrong current password', { userId, ip: req.ip });
+      return res.status(401).json({ message: 'Current password is incorrect' });
+    }
 
     const isSamePassword = await bcrypt.compare(newPassword, user.password);
     if (isSamePassword) {
@@ -214,6 +225,7 @@ exports.changePassword = async (req, res) => {
     await user.save();
 
     const newToken = generateToken(user);
+    logger.info('Password changed successfully', { userId, ip: req.ip });
     res.json({ message: 'Password changed successfully', token: newToken, refreshToken: user.refreshToken });
   } catch (error) {
     console.error('Change password error:', error.message);
@@ -233,6 +245,7 @@ exports.logout = async (req, res) => {
     user.refreshTokenExpiresAt = null;
     await user.save();
 
+    logger.info('User logged out', { userId: req.user.id, ip: req.ip });
     res.json({ message: 'Logged out successfully' });
   } catch (error) {
     console.error('Logout error:', error.message);
