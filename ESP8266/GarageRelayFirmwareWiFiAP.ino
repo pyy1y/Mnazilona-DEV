@@ -710,12 +710,18 @@ int inquireServer() {
 
   String inquiryUrl = String(SERVER_BASE_URL) + SERVER_INQUIRY_PATH;
   bool isHttps = inquiryUrl.startsWith("https://");
+  if (isHttps) wifiSecureClient.setTimeout(15000);
+
   bool ok = isHttps ? http.begin(wifiSecureClient, inquiryUrl)
                     : http.begin(wifiPlainClient,  inquiryUrl);
   if (!ok) return INQUIRY_FAIL;
 
   http.addHeader("Content-Type", "application/json");
-  http.setTimeout(10000);
+  http.addHeader("User-Agent",   "Mnazilona-ESP8266/" FIRMWARE_VERSION);
+  http.addHeader("Connection",   "close");
+  http.setTimeout(15000);
+  http.setReuse(false);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
   JsonDocument doc;
   doc["serialNumber"] = serialNumber.c_str();
@@ -2247,15 +2253,15 @@ void setup() {
   }
 
   if (strlen(ca_cert) > 60) {
-    // ESP8266 BearSSL takes a different setCACert API; in this dev
-    // build we just stay insecure. Wire setTrustAnchors() here if you
-    // ship a production CA bundle.
     wifiSecureClient.setInsecure();
     Serial.println("[TLS] CA cert configured but ignored on ESP8266 dev build");
   } else {
     wifiSecureClient.setInsecure();
     Serial.println("[TLS] WARNING: insecure mode (dev only!)");
   }
+  // 2048 RX is enough for the ECDSA Let's Encrypt chain + small JSON;
+  // 512 TX fits the inquiry POST body. Saves ~12 KB of heap vs default.
+  wifiSecureClient.setBufferSizes(2048, 512);
 
   WiFi.mode(WIFI_STA);
   String macAddr = WiFi.macAddress();
