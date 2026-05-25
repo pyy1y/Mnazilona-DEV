@@ -42,6 +42,7 @@ type Device = {
   deviceType?: string;
   isOnline: boolean;
   room?: string | null;
+  role?: 'owner' | 'shared';
 };
 
 // ======================================
@@ -563,9 +564,13 @@ export default function RoomsScreen() {
                         <Text style={styles.assignDeviceName} numberOfLines={1}>
                           {device.name || device.serialNumber}
                         </Text>
-                        <Text style={styles.assignDeviceSerial}>
-                          {device.serialNumber}
-                        </Text>
+                        {device.role === 'shared' ? (
+                          <Text style={styles.sharedLabel}>Shared with you</Text>
+                        ) : (
+                          <Text style={styles.assignDeviceSerial}>
+                            {device.serialNumber}
+                          </Text>
+                        )}
                       </View>
                       <View
                         style={[
@@ -895,6 +900,12 @@ const styles = StyleSheet.create({
   assignDeviceSerial: {
     fontSize: 12,
     color: '#999',
+    marginTop: 2,
+  },
+  sharedLabel: {
+    fontSize: 11,
+    color: '#7C3AED',
+    fontWeight: '600',
     marginTop: 2,
   },
   onlineDot: {

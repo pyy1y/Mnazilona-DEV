@@ -8,7 +8,8 @@ const Notification = require('../models/Notification');
 const User = require('../models/User');
 const Firmware = require('../models/Firmware');
 const DeviceShare = require('../models/DeviceShare');
-const { topicOf, publishMessage, MQTT_PUBLIC_HOST, MQTT_PUBLIC_PORT, invalidateDeviceMeta } = require('../config/mqtt');
+const UserDeviceRoom = require('../models/UserDeviceRoom');
+const { topicOf, publishMessage, MQTT_PUBLIC_HOST, MQTT_PUBLIC_PORT, invalidateDeviceMeta, logDevice } = require('../config/mqtt');
 const { emitToUser, emitToAdminDevicesView } = require('../config/socket');
 const { canUserAccessDevice, getDeviceACL } = require('../services/mqttAclService');
 const { trackDeviceCommand, trackPairAttempt } = require('../services/anomalyDetector');
@@ -21,17 +22,27 @@ const {
 
 const ALLOWED_COMMANDS = ['open', 'on', 'off', 'toggle', 'status', 'restart', 'config'];
 
-const sanitizeDeviceResponse = (device) => ({
-  id: device._id,
-  name: device.name,
-  serialNumber: device.serialNumber,
-  macAddress: device.macAddress || null,
-  deviceType: device.deviceType,
-  isOnline: device.isOnline,
-  lastSeen: device.lastSeen,
-  pairedAt: device.pairedAt,
-  state: device.state,
-});
+// Role-aware: owner-only fields (macAddress, warrantyStartDate) are stripped
+// for shared users so the backend never returns them.
+const sanitizeDeviceResponse = (device, role = 'owner') => {
+  const base = {
+    id: device._id,
+    name: device.name,
+    serialNumber: device.serialNumber,
+    deviceType: device.deviceType,
+    isOnline: device.isOnline,
+    lastSeen: device.lastSeen,
+    pairedAt: device.pairedAt,
+    state: device.state,
+    role,
+  };
+  if (role !== 'owner') return base;
+  return {
+    ...base,
+    macAddress: device.macAddress || null,
+    warrantyStartDate: device.warrantyStartDate || null,
+  };
+};
 
 // ============================================================
 // inquiry - ESP32 device setup endpoint
@@ -358,6 +369,7 @@ exports.unpair = async (req, res) => {
     }).select('sharedWith status').lean();
 
     await DeviceShare.deleteMany({ device: device._id });
+    await UserDeviceRoom.deleteMany({ device: device._id });
 
     for (const s of sharesToNotify) {
       try {
@@ -420,23 +432,31 @@ exports.unpair = async (req, res) => {
 // ============================================================
 // getAll - List devices visible to the user (owned + actively shared)
 // ============================================================
-const DEVICE_LIST_FIELDS = 'name serialNumber macAddress deviceType isOnline lastSeen pairedAt warrantyStartDate state room';
+// Owner sees full metadata. Shared users never see macAddress, warrantyStartDate,
+// or the owner's room id — their `room` comes from UserDeviceRoom instead.
+const OWNER_DEVICE_FIELDS  = 'name serialNumber macAddress deviceType isOnline lastSeen pairedAt warrantyStartDate state room';
+const SHARED_DEVICE_FIELDS = 'name serialNumber deviceType isOnline lastSeen pairedAt state';
 
 exports.getAll = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const [ownedDevices, activeShares] = await Promise.all([
+    const [ownedDevices, activeShares, sharedRoomRows] = await Promise.all([
       Device.find({ owner: userId })
-        .select(DEVICE_LIST_FIELDS)
+        .select(OWNER_DEVICE_FIELDS)
         .sort({ pairedAt: -1 })
         .lean(),
       DeviceShare.find({ sharedWith: userId, status: 'active' })
-        .populate({ path: 'device', select: `${DEVICE_LIST_FIELDS} owner` })
+        .populate({ path: 'device', select: `${SHARED_DEVICE_FIELDS} owner` })
         .populate({ path: 'owner', select: 'email name' })
         .sort({ createdAt: -1 })
         .lean(),
+      UserDeviceRoom.find({ user: userId }).select('device room').lean(),
     ]);
+
+    const userRoomByDeviceId = new Map(
+      sharedRoomRows.map((r) => [r.device.toString(), r.room ? r.room.toString() : null])
+    );
 
     const owned = ownedDevices.map((d) => ({
       ...d,
@@ -447,12 +467,14 @@ exports.getAll = async (req, res) => {
     const shared = activeShares
       .filter((s) => s.device) // drop shares whose device was deleted
       .map((s) => {
-        const { owner: deviceOwner, ...deviceFields } = s.device;
+        const { owner: deviceOwner, _id, ...deviceFields } = s.device;
         return {
           ...deviceFields,
+          _id,
           role: 'shared',
           permissions: s.permissions,
           shareId: s._id,
+          room: userRoomByDeviceId.get(_id.toString()) || null,
           sharedBy: s.owner
             ? { id: s.owner._id, email: s.owner.email, name: s.owner.name }
             : null,
@@ -487,10 +509,8 @@ exports.getOne = async (req, res) => {
     const device = await Device.findOne({ serialNumber: cleanSerial }).lean();
     if (!device) return res.status(404).json({ message: 'Device not found' });
 
-    res.json({
-      ...sanitizeDeviceResponse(device),
-      role: req.deviceRole,
-    });
+    // req.deviceRole was set by requireDeviceAccess('view') — owner|shared
+    res.json(sanitizeDeviceResponse(device, req.deviceRole));
   } catch (error) {
     console.error('Get device error:', error.message);
     res.status(500).json({ message: 'Failed to fetch device' });
@@ -563,12 +583,23 @@ exports.sendCommand = async (req, res) => {
     try {
       await publishMessage(topic, payload);
 
-      await DeviceLog.create({
-        serialNumber: cleanSerial,
-        type: 'info',
-        message: `Command "${cleanCommand}" sent`,
-        source: 'user',
-      });
+      const actor = await User.findById(userId).select('name email');
+      const actorName = actor?.name || actor?.email || 'Someone';
+
+      // logDevice writes the row and pushes 'device:log' over the socket to
+      // the owner (always) and to the actor when they're a shared user.
+      await logDevice(
+        cleanSerial,
+        'info',
+        `${actorName} sent "${cleanCommand}" to ${device.name || cleanSerial}`,
+        'user',
+        {
+          performedBy: userId,
+          performedByName: actorName,
+          performedByRole: req.deviceRole || 'owner',
+          action: cleanCommand,
+        }
+      );
 
       const responseBody = {
         message: 'Command sent successfully',
@@ -674,11 +705,18 @@ exports.renameDevice = async (req, res) => {
     device.name = trimmedName;
     await device.save();
 
+    const actor = await User.findById(userId).select('name email');
+    const actorName = actor?.name || actor?.email || 'Owner';
+
     await DeviceLog.create({
       serialNumber: cleanSerial,
       type: 'info',
       message: `Device renamed from "${oldName}" to "${trimmedName}"`,
       source: 'user',
+      performedBy: userId,
+      performedByName: actorName,
+      performedByRole: 'owner',
+      action: 'rename',
     });
 
     // Push the new name to all of this user's app sockets so the rename
@@ -712,13 +750,19 @@ exports.getLogs = async (req, res) => {
 
     const cleanSerial = serialNumber.trim().toUpperCase();
 
+    // Owner sees everything for this device. Shared users see only their own
+    // actions — never the owner's, never other shared users'.
+    const filter = req.deviceRole === 'owner'
+      ? { serialNumber: cleanSerial }
+      : { serialNumber: cleanSerial, performedBy: req.user.id };
+
     const [logs, total] = await Promise.all([
-      DeviceLog.find({ serialNumber: cleanSerial })
+      DeviceLog.find(filter)
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
-      DeviceLog.countDocuments({ serialNumber: cleanSerial }),
+      DeviceLog.countDocuments(filter),
     ]);
 
     res.json({
@@ -727,6 +771,8 @@ exports.getLogs = async (req, res) => {
         message: log.message,
         type: log.type,
         source: log.source,
+        performedByName: log.performedByName || null,
+        action: log.action || null,
       })),
       total,
       page,
@@ -763,18 +809,28 @@ exports.getAllLogs = async (req, res) => {
       }
     });
 
-    const serialNumbers = Object.keys(deviceNames);
-    if (!serialNumbers.length) {
+    const ownedSerials  = ownedDevices.map((d) => d.serialNumber);
+    const sharedSerials = activeShares.filter((s) => s.device).map((s) => s.device.serialNumber);
+
+    // Owner: every log on owned devices.
+    // Shared user: only their own actions on shared devices.
+    const orClauses = [];
+    if (ownedSerials.length)  orClauses.push({ serialNumber: { $in: ownedSerials } });
+    if (sharedSerials.length) orClauses.push({ serialNumber: { $in: sharedSerials }, performedBy: userId });
+
+    if (!orClauses.length) {
       return res.json({ logs: [], total: 0, page: 1, pages: 0 });
     }
 
+    const filter = orClauses.length === 1 ? orClauses[0] : { $or: orClauses };
+
     const [logs, total] = await Promise.all([
-      DeviceLog.find({ serialNumber: { $in: serialNumbers } })
+      DeviceLog.find(filter)
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
-      DeviceLog.countDocuments({ serialNumber: { $in: serialNumbers } }),
+      DeviceLog.countDocuments(filter),
     ]);
 
     res.json({
@@ -785,6 +841,8 @@ exports.getAllLogs = async (req, res) => {
         source: log.source,
         serialNumber: log.serialNumber,
         deviceName: deviceNames[log.serialNumber] || log.serialNumber,
+        performedByName: log.performedByName || null,
+        action: log.action || null,
       })),
       total,
       page,

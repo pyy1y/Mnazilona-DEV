@@ -2,6 +2,7 @@ const Device = require('../models/Device');
 const DeviceShare = require('../models/DeviceShare');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
+const UserDeviceRoom = require('../models/UserDeviceRoom');
 const { emitToUser } = require('../config/socket');
 const sendEmail = require('../utils/sendEmail');
 
@@ -354,6 +355,10 @@ const revokeShare = async (ownerId, serialNumber, shareId) => {
   share.status = 'revoked';
   share.revokedAt = new Date();
   await share.save();
+
+  // Clear this user's per-user room mapping for the device so it doesn't
+  // linger as a phantom entry under their rooms after access is revoked.
+  await UserDeviceRoom.deleteMany({ user: share.sharedWith, device: device._id });
 
   let revokedOwner = null;
   let revokedInvitee = null;

@@ -1,6 +1,8 @@
 const mongoose = require('mongoose');
 const Room = require('../models/Room');
 const Device = require('../models/Device');
+const UserDeviceRoom = require('../models/UserDeviceRoom');
+const { getDeviceAccessRole } = require('../services/deviceAccessService');
 
 // FIX: Escape regex special characters to prevent ReDoS attacks
 function escapeRegex(str) {
@@ -15,15 +17,30 @@ exports.getAll = async (req, res) => {
     const rooms = await Room.findByOwner(req.user.id);
 
     const roomIds = rooms.map((r) => r._id);
-    const ownerId = mongoose.Types.ObjectId.createFromHexString(req.user.id);
-    const deviceCounts = await Device.aggregate([
-      { $match: { owner: ownerId, room: { $in: roomIds } } },
-      { $group: { _id: '$room', count: { $sum: 1 } } },
+    const userId = mongoose.Types.ObjectId.createFromHexString(req.user.id);
+
+    // Count both owned-device assignments (Device.room) and shared-device
+    // assignments (UserDeviceRoom) so a shared device the user filed into one
+    // of their rooms still bumps the badge.
+    const [ownedCounts, sharedCounts] = await Promise.all([
+      Device.aggregate([
+        { $match: { owner: userId, room: { $in: roomIds } } },
+        { $group: { _id: '$room', count: { $sum: 1 } } },
+      ]),
+      UserDeviceRoom.aggregate([
+        { $match: { user: userId, room: { $in: roomIds } } },
+        { $group: { _id: '$room', count: { $sum: 1 } } },
+      ]),
     ]);
 
     const countMap = {};
-    deviceCounts.forEach((dc) => {
-      countMap[dc._id.toString()] = dc.count;
+    ownedCounts.forEach((c) => {
+      const key = c._id.toString();
+      countMap[key] = (countMap[key] || 0) + c.count;
+    });
+    sharedCounts.forEach((c) => {
+      const key = c._id.toString();
+      countMap[key] = (countMap[key] || 0) + c.count;
     });
 
     const result = rooms.map((room) => ({
@@ -156,6 +173,7 @@ exports.remove = async (req, res) => {
     }
 
     await Device.updateMany({ room: room._id, owner: req.user.id }, { $set: { room: null } });
+    await UserDeviceRoom.deleteMany({ user: req.user.id, room: room._id });
     await room.deleteOne();
 
     res.json({ message: 'Room deleted successfully' });
@@ -173,58 +191,47 @@ exports.assignDevice = async (req, res) => {
     const { id } = req.params;
     const { serialNumber } = req.body;
 
-    console.log('assignDevice called:', { roomId: id, serialNumber, userId: req.user.id });
-
     if (!serialNumber) {
       return res.status(400).json({ message: 'Serial number is required' });
     }
-
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: 'Invalid room ID' });
     }
 
+    // Room must belong to the caller — owner XOR shared user, each has their own rooms.
     const room = await Room.findOne({ _id: id, owner: req.user.id });
     if (!room) {
-      console.log('Room not found:', { roomId: id, userId: req.user.id });
       return res.status(404).json({ message: 'Room not found' });
     }
 
     const cleanSerial = serialNumber.trim().toUpperCase();
+    const { role, device } = await getDeviceAccessRole(req.user.id, cleanSerial);
 
-    // Check if device exists first (for better error messages)
-    const existingDevice = await Device.findOne({ serialNumber: cleanSerial })
-      .select('serialNumber owner deviceType name')
-      .lean();
-
-    if (!existingDevice) {
-      console.log('Device not found in DB:', cleanSerial);
+    if (role === 'none' || !device) {
       return res.status(404).json({
-        message: `Device "${cleanSerial}" not found in database. Make sure the device is paired first.`,
+        message: 'You do not have access to this device.',
       });
     }
 
-    if (!existingDevice.owner || existingDevice.owner.toString() !== req.user.id) {
-      console.log('Device owner mismatch:', {
-        deviceOwner: existingDevice.owner?.toString(),
-        requestUser: req.user.id,
-      });
-      return res.status(404).json({
-        message: 'Device not owned by you. Please pair the device to your account first.',
-      });
+    if (role === 'owner') {
+      // Owner path — assignment lives on Device.room (unchanged)
+      device.room = room._id;
+      await device.save();
+    } else {
+      // Shared path — per-user mapping. Upsert so the same device can be moved
+      // between rooms by the shared user without violating the unique
+      // (user, device) index.
+      await UserDeviceRoom.findOneAndUpdate(
+        { user: req.user.id, device: device._id },
+        {
+          user: req.user.id,
+          device: device._id,
+          serialNumber: cleanSerial,
+          room: room._id,
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
     }
-
-    // Use findOneAndUpdate to avoid issues with select:false fields (mqttToken, mqttUsername, mqttPassword)
-    const device = await Device.findOneAndUpdate(
-      { serialNumber: cleanSerial, owner: req.user.id },
-      { room: room._id },
-      { new: true, select: 'name serialNumber deviceType room' }
-    );
-
-    if (!device) {
-      return res.status(404).json({ message: 'Device not found or not owned by you' });
-    }
-
-    console.log('Device assigned successfully:', { serial: cleanSerial, room: room.name });
 
     res.json({
       message: `Device "${device.name}" assigned to "${room.name}"`,
@@ -260,15 +267,30 @@ exports.removeDevice = async (req, res) => {
     }
 
     const cleanSerial = serialNumber.trim().toUpperCase();
+    const { role, device } = await getDeviceAccessRole(req.user.id, cleanSerial);
 
-    const device = await Device.findOneAndUpdate(
-      { serialNumber: cleanSerial, owner: req.user.id, room: room._id },
-      { room: null },
-      { new: true, select: 'name serialNumber deviceType room' }
-    );
-
-    if (!device) {
+    if (role === 'none' || !device) {
       return res.status(404).json({ message: 'Device not found in this room' });
+    }
+
+    if (role === 'owner') {
+      const updated = await Device.findOneAndUpdate(
+        { _id: device._id, owner: req.user.id, room: room._id },
+        { room: null },
+        { new: true, select: 'name serialNumber deviceType room' }
+      );
+      if (!updated) {
+        return res.status(404).json({ message: 'Device not found in this room' });
+      }
+    } else {
+      const removed = await UserDeviceRoom.findOneAndDelete({
+        user: req.user.id,
+        device: device._id,
+        room: room._id,
+      });
+      if (!removed) {
+        return res.status(404).json({ message: 'Device not found in this room' });
+      }
     }
 
     res.json({
@@ -292,12 +314,25 @@ exports.getDevices = async (req, res) => {
       return res.status(404).json({ message: 'Room not found' });
     }
 
-    const devices = await Device.find({ room: room._id, owner: req.user.id })
-      .select('name serialNumber macAddress deviceType isOnline lastSeen pairedAt state')
-      .sort({ pairedAt: -1 })
-      .lean();
+    const OWNER_FIELDS  = 'name serialNumber macAddress deviceType isOnline lastSeen pairedAt state';
+    const SHARED_FIELDS = 'name serialNumber deviceType isOnline lastSeen pairedAt state';
 
-    res.json({ room: room.toJSON(), devices });
+    const [ownedDevices, sharedMapRows] = await Promise.all([
+      Device.find({ room: room._id, owner: req.user.id })
+        .select(OWNER_FIELDS)
+        .sort({ pairedAt: -1 })
+        .lean(),
+      UserDeviceRoom.find({ user: req.user.id, room: room._id })
+        .populate({ path: 'device', select: SHARED_FIELDS })
+        .lean(),
+    ]);
+
+    const owned = ownedDevices.map((d) => ({ ...d, role: 'owner' }));
+    const shared = sharedMapRows
+      .filter((r) => r.device)
+      .map((r) => ({ ...r.device, role: 'shared' }));
+
+    res.json({ room: room.toJSON(), devices: [...owned, ...shared] });
   } catch (error) {
     console.error('Get room devices error:', error.message);
     res.status(500).json({ message: 'Failed to fetch room devices' });

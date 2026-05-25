@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   StyleSheet,
   Text,
@@ -31,6 +31,8 @@ interface DeviceLog {
   message: string;
   source: string;
   timestamp: string;
+  performedByName?: string | null;
+  action?: string | null;
 }
 
 interface DeviceWarranty {
@@ -39,6 +41,7 @@ interface DeviceWarranty {
   serialNumber: string;
   warrantyStartDate: string | null;
   isOnline: boolean;
+  role?: 'owner' | 'shared';
 }
 
 const LOG_COLORS: Record<string, string> = {
@@ -160,6 +163,8 @@ export default function MyDevicesScreen() {
             message: entry.message,
             source: entry.source,
             timestamp: entry.timestamp,
+            performedByName: entry.performedByName || null,
+            action: entry.action || null,
           };
           setLogs((prev) => {
             // Reset to page 1 view; cap buffer so the list never grows
@@ -179,6 +184,14 @@ export default function MyDevicesScreen() {
       loadDevices();
       return () => {};
     }, [activeTab, loadInitialLogs, loadDevices])
+  );
+
+  // Warranty is owner-only. The backend already strips warrantyStartDate from
+  // shared rows, but we also exclude them entirely from the warranty list so
+  // shared devices don't render an empty "Not activated" card.
+  const ownedDevices = useMemo(
+    () => devices.filter((d) => !d.role || d.role === 'owner'),
+    [devices]
   );
 
   // ── Warranty helpers ──
@@ -262,6 +275,11 @@ export default function MyDevicesScreen() {
         <Text style={styles.logMessage} numberOfLines={2}>
           {item.message}
         </Text>
+        {item.performedByName ? (
+          <Text style={styles.logActor} numberOfLines={1}>
+            by {item.performedByName}
+          </Text>
+        ) : null}
         <View style={styles.logMeta}>
           <View style={[styles.logTypeBadge, { backgroundColor: `${LOG_COLORS[item.type]}15` }]}>
             <Text style={[styles.logTypeText, { color: LOG_COLORS[item.type] }]}>
@@ -417,14 +435,14 @@ export default function MyDevicesScreen() {
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={BRAND_COLOR} />
         </View>
-      ) : devices.length === 0 ? (
+      ) : ownedDevices.length === 0 ? (
         <View style={styles.centered}>
           <MaterialCommunityIcons name="devices" size={48} color="#CCC" />
           <Text style={styles.emptyText}>No devices paired</Text>
         </View>
       ) : (
         <FlatList
-          data={devices}
+          data={ownedDevices}
           keyExtractor={(item) => item._id}
           renderItem={renderWarrantyItem}
           contentContainerStyle={styles.listContent}
@@ -556,6 +574,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#555',
     lineHeight: 18,
+    marginBottom: 6,
+  },
+  logActor: {
+    fontSize: 12,
+    color: '#7A8CA5',
+    fontStyle: 'italic',
     marginBottom: 6,
   },
   logMeta: {

@@ -1,6 +1,7 @@
 const deviceShareService = require('../services/deviceShareService');
 const { ShareError } = deviceShareService;
 const { isValidObjectId } = require('../utils/helpers');
+const Notification = require('../models/Notification');
 
 const handleError = (res, error, fallbackMessage) => {
   if (error instanceof ShareError) {
@@ -72,6 +73,19 @@ exports.accept = async (req, res) => {
     }
 
     const share = await deviceShareService.acceptInvitation(req.user.id, shareId);
+
+    // Flip the invitee's share_request notification so the card renders an
+    // "Accepted" pill instead of the pending Accept/Decline buttons.
+    await Notification.updateOne(
+      {
+        recipient: req.user.id,
+        type: 'share_request',
+        'data.shareId': share.id,
+        status: 'pending',
+      },
+      { $set: { status: 'approved', respondedAt: new Date(), isRead: true } }
+    );
+
     res.json({ message: 'Invitation accepted', share });
   } catch (error) {
     handleError(res, error, 'Failed to accept invitation');
@@ -89,6 +103,17 @@ exports.reject = async (req, res) => {
     }
 
     const share = await deviceShareService.rejectInvitation(req.user.id, shareId);
+
+    await Notification.updateOne(
+      {
+        recipient: req.user.id,
+        type: 'share_request',
+        'data.shareId': share.id,
+        status: 'pending',
+      },
+      { $set: { status: 'denied', respondedAt: new Date(), isRead: true } }
+    );
+
     res.json({ message: 'Invitation rejected', share });
   } catch (error) {
     handleError(res, error, 'Failed to reject invitation');

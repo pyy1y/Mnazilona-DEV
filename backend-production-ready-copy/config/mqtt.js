@@ -121,7 +121,7 @@ const invalidateDeviceMeta = (serialNumber) => {
   deviceMetaCache.delete(serialNumber.toUpperCase());
 };
 
-const logDevice = async (serialNumber, type, message, source = 'device') => {
+const logDevice = async (serialNumber, type, message, source = 'device', extra = {}) => {
   try {
     const sn = serialNumber.toUpperCase();
     const key = `${sn}:${message}`;
@@ -136,19 +136,41 @@ const logDevice = async (serialNumber, type, message, source = 'device') => {
       }
     }
 
-    const log = await DeviceLog.create({ serialNumber: sn, type, message, source });
+    const log = await DeviceLog.create({
+      serialNumber: sn,
+      type,
+      message,
+      source,
+      performedBy: extra.performedBy || null,
+      performedByName: extra.performedByName || null,
+      performedByRole: extra.performedByRole || 'system',
+      action: extra.action || null,
+    });
 
-    // Push the new log entry to the device owner in real time
     const meta = await getDeviceMeta(sn);
+    const payload = {
+      serialNumber: sn,
+      deviceName: meta.name || sn,
+      type: log.type,
+      message: log.message,
+      source: log.source,
+      timestamp: log.createdAt,
+      performedByName: log.performedByName,
+    };
+
+    // Owner always gets the log push (sees everything for their device).
     if (meta.ownerId) {
-      emitToUser(meta.ownerId, 'device:log', {
-        serialNumber: sn,
-        deviceName: meta.name || sn,
-        type: log.type,
-        message: log.message,
-        source: log.source,
-        timestamp: log.createdAt,
-      });
+      emitToUser(meta.ownerId, 'device:log', payload);
+    }
+
+    // If the actor is a shared user, also push to them so their My Devices >
+    // Logs tab updates live. We never push to OTHER shared users — that would
+    // leak cross-user activity.
+    if (log.performedBy && log.performedByRole === 'shared') {
+      const actorId = log.performedBy.toString();
+      if (actorId !== String(meta.ownerId || '')) {
+        emitToUser(actorId, 'device:log', payload);
+      }
     }
   } catch (err) {
     logger.error('DeviceLog failed', { error: err.message });
@@ -418,6 +440,7 @@ module.exports = {
   publishMessage,
   isMqttHealthy,
   invalidateDeviceMeta,
+  logDevice,
   MQTT_BROKER_HOST,
   MQTT_BROKER_URL,
   MQTT_PUBLIC_HOST,

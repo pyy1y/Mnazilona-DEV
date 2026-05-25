@@ -319,7 +319,9 @@ function DeviceListItem({
         <Text style={styles.unknownSub}>
           {device.deviceType || 'Unknown Device Type'}
         </Text>
-        <Text style={styles.serialText}>SN: {device.serialNumber}</Text>
+        {!isShared && (
+          <Text style={styles.serialText}>SN: {device.serialNumber}</Text>
+        )}
       </View>
     );
   }

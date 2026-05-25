@@ -14,7 +14,10 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  Dimensions,
 } from 'react-native';
+
+const LOGS_MAX_HEIGHT = Math.round(Dimensions.get('window').height * 0.55);
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 // ======================================
@@ -188,18 +191,22 @@ function GarageCard({
         return (
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>{name}</Text>
-            <TouchableOpacity style={styles.menuItem} onPress={() => setActiveSection('rename')}>
-              <MaterialCommunityIcons name="pencil-outline" size={22} color="#333" />
-              <Text style={styles.menuItemText}>Edit Name</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.menuItem} onPress={() => setActiveSection('serial')}>
-              <MaterialCommunityIcons name="barcode" size={22} color="#333" />
-              <Text style={styles.menuItemText}>Serial Number</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.menuItem} onPress={() => setActiveSection('mac')}>
-              <MaterialCommunityIcons name="ethernet" size={22} color="#333" />
-              <Text style={styles.menuItemText}>MAC Address</Text>
-            </TouchableOpacity>
+            {onRename && (
+              <>
+                <TouchableOpacity style={styles.menuItem} onPress={() => setActiveSection('rename')}>
+                  <MaterialCommunityIcons name="pencil-outline" size={22} color="#333" />
+                  <Text style={styles.menuItemText}>Edit Name</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.menuItem} onPress={() => setActiveSection('serial')}>
+                  <MaterialCommunityIcons name="barcode" size={22} color="#333" />
+                  <Text style={styles.menuItemText}>Serial Number</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.menuItem} onPress={() => setActiveSection('mac')}>
+                  <MaterialCommunityIcons name="ethernet" size={22} color="#333" />
+                  <Text style={styles.menuItemText}>MAC Address</Text>
+                </TouchableOpacity>
+              </>
+            )}
             <TouchableOpacity style={styles.menuItem} onPress={handleOpenLogs}>
               <MaterialCommunityIcons name="text-box-outline" size={22} color="#333" />
               <Text style={styles.menuItemText}>Device Logs</Text>
@@ -649,14 +656,15 @@ const styles = StyleSheet.create({
     color: '#333',
   },
   logsModalContent: {
-    flex: 1,
     padding: 24,
   },
   logsHeader: {
     paddingBottom: 4,
+    marginBottom: 8,
   },
   logsScrollView: {
-    flex: 1,
+    maxHeight: LOGS_MAX_HEIGHT,
+    flexGrow: 0,
   },
   logsScrollContent: {
     paddingBottom: 20,

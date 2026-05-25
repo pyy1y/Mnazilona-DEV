@@ -3,6 +3,7 @@ const Device = require('../models/Device');
 const AllowedDevice = require('../models/AllowedDevice');
 const DeviceLog = require('../models/DeviceLog');
 const DeviceShare = require('../models/DeviceShare');
+const UserDeviceRoom = require('../models/UserDeviceRoom');
 const { topicOf, publishMessage } = require('../config/mqtt');
 const { emitToUser } = require('../config/socket');
 
@@ -135,6 +136,7 @@ exports.respondToTransfer = async (req, res) => {
       }).select('sharedWith').lean();
 
       await DeviceShare.deleteMany({ device: device._id });
+      await UserDeviceRoom.deleteMany({ device: device._id });
 
       for (const s of sharesToNotify) {
         try {

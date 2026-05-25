@@ -160,6 +160,21 @@ export default function NotificationsScreen() {
           return;
         }
 
+        // Optimistic: flip the card to its final state immediately so the
+        // user sees Accepted/Declined without waiting for the refetch.
+        setNotifications((prev) =>
+          prev.map((n) =>
+            n._id === notificationId
+              ? {
+                  ...n,
+                  isRead: true,
+                  status: action === "accept" ? "approved" : "denied",
+                  respondedAt: new Date().toISOString(),
+                }
+              : n
+          )
+        );
+
         Alert.alert(
           "Done",
           action === "accept"
@@ -345,6 +360,21 @@ export default function NotificationsScreen() {
                 { color: item.status === "approved" ? "#2E7D32" : "#C62828" },
               ]}>
                 {item.status === "approved" ? "Approved" : "Denied"}
+              </Text>
+            </View>
+          )}
+
+          {/* Status badge for responded share invitations */}
+          {item.type === "share_request" && item.status !== "pending" && (
+            <View style={[
+              styles.statusBadge,
+              { backgroundColor: item.status === "approved" ? "#E8F5E9" : "#FFEBEE" },
+            ]}>
+              <Text style={[
+                styles.statusText,
+                { color: item.status === "approved" ? "#2E7D32" : "#C62828" },
+              ]}>
+                {item.status === "approved" ? "Accepted" : "Declined"}
               </Text>
             </View>
           )}
