@@ -10,7 +10,7 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "buildNumber": "17",
+      "buildNumber": "19",
       "bundleIdentifier": "com.mnazilona.MnazilonaApp",
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "Required to connect to Mnazilona devices for setup and control.",

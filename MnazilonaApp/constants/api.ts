@@ -2,8 +2,8 @@
 // ======================================
 // API Configuration
 // ======================================
-const DEFAULT_DEV_API_URL = 'http://192.168.8.143:3000';
-const DEFAULT_PROD_API_URL = 'http://192.168.8.143:3000';
+const DEFAULT_DEV_API_URL = 'https://mnazilona.xyz/api';
+const DEFAULT_PROD_API_URL = 'https://mnazilona.xyz/api';
 const isDev = __DEV__;
 
 function normalizeApiUrl(url: string): string {

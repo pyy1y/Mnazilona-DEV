@@ -17,6 +17,7 @@ import {
   Dimensions,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { onSocketEvent } from '../utils/socket';
 
 const LOGS_MAX_HEIGHT = Math.round(Dimensions.get('window').height * 0.55);
 
@@ -287,16 +288,6 @@ function ACCard({
     closeModal();
   }, [newName, onRename, serialNumber, closeModal]);
 
-  const logsPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const fetchLogs = useCallback(async () => {
-    if (!onFetchLogs) return;
-    try {
-      const fetched = await onFetchLogs(serialNumber);
-      setLogs(fetched);
-    } catch { /* silently ignore */ }
-  }, [onFetchLogs, serialNumber]);
-
   const handleOpenLogs = useCallback(async () => {
     setActiveSection('logs');
     if (!onFetchLogs) return;
@@ -311,22 +302,20 @@ function ACCard({
     }
   }, [onFetchLogs, serialNumber]);
 
+  // Real-time: while the logs panel is open, prepend every device:log event
+  // the backend pushes for THIS device. Replaces the old 5s HTTP poll.
   useEffect(() => {
-    if (activeSection !== 'logs' || !onFetchLogs) {
-      if (logsPollRef.current) {
-        clearInterval(logsPollRef.current);
-        logsPollRef.current = null;
-      }
-      return;
-    }
-    logsPollRef.current = setInterval(fetchLogs, 5000);
-    return () => {
-      if (logsPollRef.current) {
-        clearInterval(logsPollRef.current);
-        logsPollRef.current = null;
-      }
-    };
-  }, [activeSection, fetchLogs, onFetchLogs]);
+    if (activeSection !== 'logs') return;
+    return onSocketEvent('device:log', (entry: any) => {
+      if (!entry?.serialNumber || entry.serialNumber !== serialNumber) return;
+      const incoming: LogEntry = {
+        timestamp: entry.timestamp,
+        message: entry.message,
+        type: entry.type,
+      };
+      setLogs((prev) => [incoming, ...prev].slice(0, 200));
+    });
+  }, [activeSection, serialNumber]);
 
   // Arc calculations
   const knobAngle = useMemo(() => tempToAngle(effectiveTargetTemp), [effectiveTargetTemp]);

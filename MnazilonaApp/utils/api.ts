@@ -169,6 +169,16 @@ async function performTokenRefresh(): Promise<string | null> {
 
     await TokenManager.set(data.token);
     await RefreshTokenManager.set(data.refreshToken);
+    // Force the live socket to reconnect with the rotated access token.
+    // Dynamic import avoids a circular dep (socket.ts imports api.ts for
+    // TokenManager); refreshSocketAuth() is a no-op if no socket exists.
+    try {
+      const { refreshSocketAuth } = await import('./socket');
+      await refreshSocketAuth();
+    } catch {
+      // Non-fatal — REST already has the new token; the socket will retry
+      // and pick up the new auth on its next manual connect.
+    }
     return data.token as string;
   })();
 
