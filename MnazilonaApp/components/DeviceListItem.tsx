@@ -15,7 +15,7 @@ import LockCard from './LockCard';
 // Types
 // ======================================
 type DeviceCommand = {
-  action: 'open' | 'close' | 'stop';
+  action: 'open' | 'close' | 'toggle';
 };
 
 type Device = {
@@ -175,6 +175,15 @@ function DeviceListItem({
     return actionLoading.startsWith(`${device.serialNumber}:`);
   }, [actionLoading, device.serialNumber]);
 
+  // Sub-action currently in flight for this device (e.g. "open" / "close" / "toggle").
+  // Garage card uses this so only the pressed button shows a spinner.
+  const loadingActionForDevice = useMemo<'open' | 'close' | 'toggle' | null>(() => {
+    if (!isLoading || !actionLoading) return null;
+    const action = actionLoading.split(':')[1];
+    if (action === 'open' || action === 'close' || action === 'toggle') return action;
+    return null;
+  }, [isLoading, actionLoading]);
+
   const handleCommand = useCallback(
     (command: DeviceCommand) => {
       onSendCommand(device.serialNumber, command);
@@ -301,6 +310,7 @@ function DeviceListItem({
         macAddress={device.macAddress}
         isOnline={device.isOnline}
         isLoading={isLoading}
+        loadingAction={loadingActionForDevice}
         doorState={device.state?.doorState || null}
         onAction={(_serial, cmd) => handleCommand(cmd)}
         onRename={renameProp}

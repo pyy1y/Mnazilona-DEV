@@ -20,7 +20,7 @@ const {
   storeIdempotentResponse,
 } = require('../services/idempotencyService');
 
-const ALLOWED_COMMANDS = ['open', 'on', 'off', 'toggle', 'status', 'restart', 'config'];
+const ALLOWED_COMMANDS = ['open', 'close', 'toggle', 'on', 'off', 'status', 'restart', 'config'];
 
 // Role-aware: owner-only fields (macAddress, warrantyStartDate) are stripped
 // for shared users so the backend never returns them.

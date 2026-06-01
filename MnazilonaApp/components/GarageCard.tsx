@@ -24,8 +24,10 @@ import { onSocketEvent } from '../utils/socket';
 // ======================================
 // Types
 // ======================================
+export type GarageAction = 'open' | 'close' | 'toggle';
+
 type GarageCommand = {
-  action: 'open' | 'close' | 'stop';
+  action: GarageAction;
 };
 
 export type LogEntry = {
@@ -41,6 +43,8 @@ interface GarageCardProps {
   isOnline: boolean;
   isLoading: boolean;
   doorState?: 'open' | 'closed' | null;
+  /** Specific action currently in flight; when set, only that button spins. */
+  loadingAction?: GarageAction | null;
   onAction: (serialNumber: string, command: GarageCommand) => void;
   onRename?: (serialNumber: string, newName: string) => void;
   onFetchLogs?: (serialNumber: string) => Promise<LogEntry[]>;
@@ -50,6 +54,8 @@ interface GarageCardProps {
   onlineText?: string;
   offlineText?: string;
   openButtonText?: string;
+  closeButtonText?: string;
+  toggleButtonText?: string;
   doorOpenText?: string;
   doorClosedText?: string;
 }
@@ -64,6 +70,7 @@ function GarageCard({
   isOnline,
   isLoading,
   doorState,
+  loadingAction,
   onAction,
   onRename,
   onFetchLogs,
@@ -72,6 +79,8 @@ function GarageCard({
   onlineText = 'ONLINE',
   offlineText = 'OFFLINE',
   openButtonText = 'OPEN',
+  closeButtonText = 'CLOSE',
+  toggleButtonText = 'OPEN / CLOSE',
   doorOpenText = 'STATUS: OPEN',
   doorClosedText = 'STATUS: CLOSED',
 }: GarageCardProps) {
@@ -82,10 +91,16 @@ function GarageCard({
   const [logsLoading, setLogsLoading] = useState(false);
 
   // Handlers
-  const handleOpen = useCallback(() => {
-    if (!isOnline || isLoading) return;
-    onAction(serialNumber, { action: 'open' });
-  }, [onAction, serialNumber, isOnline, isLoading]);
+  const handleAction = useCallback(
+    (action: GarageAction) => {
+      if (!isOnline || isLoading) return;
+      onAction(serialNumber, { action });
+    },
+    [onAction, serialNumber, isOnline, isLoading]
+  );
+  const handleOpen   = useCallback(() => handleAction('open'),   [handleAction]);
+  const handleClose  = useCallback(() => handleAction('close'),  [handleAction]);
+  const handleToggle = useCallback(() => handleAction('toggle'), [handleAction]);
 
   const openMenu = useCallback(() => {
     setActiveSection('menu');
@@ -359,22 +374,36 @@ function GarageCard({
         </View>
       )}
 
-      {/* Action Button */}
-      <TouchableOpacity
-        style={[styles.primaryBtn, { backgroundColor: buttonBackgroundColor }]}
-        onPress={handleOpen}
-        disabled={!isOnline || isLoading}
-        activeOpacity={0.8}
-        accessibilityRole="button"
-        accessibilityLabel={`${openButtonText} - ${name}`}
-        accessibilityState={{ disabled: !isOnline || isLoading }}
-      >
-        {isLoading ? (
-          <ActivityIndicator color="#FFFFFF" size="small" />
-        ) : (
-          <Text style={styles.primaryBtnText}>{openButtonText}</Text>
-        )}
-      </TouchableOpacity>
+      {/* Action Buttons: Open / Close / Open-Close (Toggle) */}
+      <View style={styles.actionsRow}>
+        {([
+          { action: 'open'   as GarageAction, label: openButtonText   },
+          { action: 'close'  as GarageAction, label: closeButtonText  },
+          { action: 'toggle' as GarageAction, label: toggleButtonText },
+        ]).map(({ action, label }) => {
+          const handlers = { open: handleOpen, close: handleClose, toggle: handleToggle } as const;
+          const isThisLoading = loadingAction === action || (isLoading && !loadingAction);
+          const disabled = !isOnline || isLoading;
+          return (
+            <TouchableOpacity
+              key={action}
+              style={[styles.actionBtn, { backgroundColor: buttonBackgroundColor }]}
+              onPress={handlers[action]}
+              disabled={disabled}
+              activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel={`${label} - ${name}`}
+              accessibilityState={{ disabled }}
+            >
+              {isThisLoading ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <Text style={styles.actionBtnText} numberOfLines={1}>{label}</Text>
+              )}
+            </TouchableOpacity>
+          );
+        })}
+      </View>
 
       {/* Offline Message */}
       {!isOnline && (
@@ -412,6 +441,7 @@ export default memo(GarageCard, (prevProps, nextProps) => {
     prevProps.name === nextProps.name &&
     prevProps.isOnline === nextProps.isOnline &&
     prevProps.isLoading === nextProps.isLoading &&
+    prevProps.loadingAction === nextProps.loadingAction &&
     prevProps.doorState === nextProps.doorState &&
     prevProps.brandColor === nextProps.brandColor &&
     prevProps.macAddress === nextProps.macAddress
@@ -511,6 +541,30 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
+  },
+  actionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  actionBtn: {
+    flex: 1,
+    height: 54,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  actionBtnText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    textAlign: 'center',
   },
   buttonContent: {
     flexDirection: 'row',

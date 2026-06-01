@@ -85,7 +85,7 @@ int                bleScanChunkIndex   = 0;
 // CONFIG - ثوابت غير سرية
 // ═══════════════════════════════════════
 #define DEVICE_NAME       "Garage Relay"
-#define FIRMWARE_VERSION  "1.0.2"
+#define FIRMWARE_VERSION  "1.0.0"
 
 // هوية الجهاز (السيريال + الـ secret) تُقرأ من NVS — تُحرق مرة وحدة
 // أثناء التصنيع. لكل جهاز قيم فريدة. لا تكتبها في الكود أبداً!
@@ -99,7 +99,7 @@ String deviceSecret = "";
 // Production: use HTTPS with your domain
 //#define SERVER_BASE_URL   "https://your-domain.com"
 // Development: uncomment for local HTTP testing
-#define SERVER_BASE_URL   "https://mnazilona.xyz/api"
+#define SERVER_BASE_URL   "http://192.168.100.116:3000"
 #define SERVER_INQUIRY_PATH "/devices/inquiry"
 #define SERVER_OTA_CHECK_PATH "/devices/ota/check"
 
@@ -142,19 +142,17 @@ const char* ota_public_key = "";
 // ═══════════════════════════════════════
 
 // ═══════════════════════════════════════
-// Hardware Pins
+// Hardware Pins — 3-Relay Garage Controller (AQY212SZ SSRs)
+// Active-HIGH: digitalWrite(pin, HIGH) energizes the SSR opto.
 // ═══════════════════════════════════════
-#define RELAY_PIN         5
-#define BUTTON_PIN        13
-#define DOOR_SENSOR_PIN   10    // SW-420 vibration/tilt sensor (DO pin)
-#define LED_R             6
-#define LED_G             7
-#define LED_B             4
+#define RELAY_OPEN_PIN    19    // D19 → R6 → OPEN SSR
+#define RELAY_CLOSE_PIN   18    // D18 → R5 → CLOSE SSR
+#define RELAY_TOGGLE_PIN  20    // D20 → R7 → TOGGLE SSR
+#define BUTTON_PIN        5     // D5  → tactile switch (R4 10k pull-up + C1 100nF)
+#define LED_R             6     // D6  → R1 (Red)
+#define LED_G             7     // D7  → R2 (Green)
+#define LED_B             4     // D4  → R3 (Blue)
 #define LED_ACTIVE_LOW    false
-
-// Door sensor: اضبط هالقيمة حسب تركيب الحساس
-// LOW = الباب مفتوح (الحساس مائل)، غيّرها لـ HIGH لو طلع عندك العكس
-#define DOOR_OPEN_STATE   LOW
 
 // ═══════════════════════════════════════
 // Timing
@@ -163,7 +161,6 @@ const char* ota_public_key = "";
 #define WIFI_RETRY_INTERVAL_MS   30000UL
 #define MQTT_HEARTBEAT_MS        30000UL
 #define MQTT_RECONNECT_MS        5000UL
-#define DOOR_SENSOR_CHECK_MS     2000UL   // كل ثانيتين يتشيك على حالة الباب
 // AP_TIMEOUT_MS replaced by BLE_TIMEOUT_MS (defined in BLE section above)
 
 // ═══════════════════════════════════════
@@ -181,8 +178,10 @@ const char* ota_public_key = "";
 
 bool ntpSynced = false;
 
-// Forward declaration
+// Forward declarations — placed above Arduino IDE's auto-generated
+// prototype block so functions that take these types compile cleanly.
 void addLog(const char* msg, const char* type = "info");
+struct RelayPulse;
 
 // Get current epoch time (0 if not synced)
 uint32_t getEpochTime() {
@@ -280,23 +279,29 @@ String mqttHost = "", mqttUser = "", mqttPass = "", mqttToken = "";
 String pairingUserId = "";
 int mqttPort = 8883;  // Default MQTTS port
 
-uint32_t relayStartTime      = 0;
-bool relayActive             = false;
+// Per-relay pulse state. All three pulse independently; Open and Close
+// are software-interlocked (see triggerOpenRelay / triggerCloseRelay).
+struct RelayPulse {
+  uint8_t     pin;
+  bool        active;
+  uint32_t    startMs;
+  const char* name;
+};
+RelayPulse relayOpen   = { RELAY_OPEN_PIN,   false, 0, "open"   };
+RelayPulse relayClose  = { RELAY_CLOSE_PIN,  false, 0, "close"  };
+RelayPulse relayToggle = { RELAY_TOGGLE_PIN, false, 0, "toggle" };
+
+inline bool anyRelayActive() {
+  return relayOpen.active || relayClose.active || relayToggle.active;
+}
+
 uint32_t lastHeartbeatMs     = 0;
 uint32_t lastMqttReconnectMs = 0;
 uint32_t lastWifiRetryMs     = 0;
 // apStartTime/lastApActivity removed — replaced by bleStartTime/bleLastActivity (BLE section)
 uint32_t lastLedToggle       = 0;
-uint32_t lastDoorCheckMs     = 0;
 bool ledToggleState          = false;
 int mqttReconnectCount       = 0;
-bool lastDoorState           = false;  // false = closed, true = open
-bool doorStateInitialized    = false;
-
-// Door sensor debounce: SW-420 is noisy, require consistent reads
-#define DOOR_DEBOUNCE_READS   3       // عدد القراءات المتطابقة المطلوبة
-uint8_t doorDebounceCount    = 0;
-bool    doorDebouncePending  = false;  // هل فيه تغيّر ينتظر التأكيد
 
 // Command Rate Limiting
 #define CMD_RATE_WINDOW_MS    5000UL  // نافذة 5 ثواني
@@ -557,119 +562,89 @@ void clearAllSettings() {
 
 
 // ══════════════════════════════════════
-//         DOOR SENSOR (SW-420)
+//   RELAYS (Pulse Only — Open / Close / Toggle)
+//   AQY212SZ SSRs driven active-HIGH.
+//   Open ↔ Close are software-interlocked.
 // ══════════════════════════════════════
 
-bool readDoorOpen() {
-  return digitalRead(DOOR_SENSOR_PIN) == DOOR_OPEN_STATE;
+static void publishRelayEvent(const char* relayName, const char* phase) {
+  // phase = "pulse" (started) | "idle" (released)
+  if (!mqttClient.connected()) return;
+  StaticJsonDocument<128> doc;
+  doc["relay"]  = anyRelayActive() ? "opened" : "closed";  // back-compat field
+  doc["action"] = relayName;
+  doc["phase"]  = phase;
+  doc["ts"]     = millis();
+  String payload;
+  serializeJson(doc, payload);
+  mqttPublishReliable("dp/report", payload.c_str());
 }
 
-void handleDoorSensor() {
-  if (millis() - lastDoorCheckMs < DOOR_SENSOR_CHECK_MS) return;
-  lastDoorCheckMs = millis();
-
-  bool currentOpen = readDoorOpen();
-
-  // أول قراءة - خذها مباشرة بدون debounce
-  if (!doorStateInitialized) {
-    lastDoorState = currentOpen;
-    doorStateInitialized = true;
-    doorDebounceCount = 0;
-    doorDebouncePending = false;
-
-    const char* state = currentOpen ? "open" : "closed";
-    Serial.printf("[Door] Initial state: %s\n", state);
-    return;
-  }
-
-  // Debounce: لازم القراءة تتغير وتثبت DOOR_DEBOUNCE_READS مرات متتالية
-  if (currentOpen != lastDoorState) {
-    // القراءة مختلفة عن الحالة الحالية
-    if (!doorDebouncePending) {
-      // بداية تغيّر محتمل
-      doorDebouncePending = true;
-      doorDebounceCount = 1;
-    } else {
-      doorDebounceCount++;
-    }
-
-    // وصلنا العدد المطلوب من القراءات المتتالية المتطابقة
-    if (doorDebounceCount >= DOOR_DEBOUNCE_READS) {
-      lastDoorState = currentOpen;
-      doorDebouncePending = false;
-      doorDebounceCount = 0;
-
-      const char* state = currentOpen ? "open" : "closed";
-      Serial.printf("[Door] State: %s (debounced)\n", state);
-
-      char logMsg[40];
-      snprintf(logMsg, sizeof(logMsg), "Door sensor: %s", state);
-      addLog(logMsg, currentOpen ? "warning" : "info");
-
-      // أرسل حالة الباب عبر MQTT (QoS 1 لضمان الوصول)
-      if (mqttClient.connected()) {
-        StaticJsonDocument<128> doc;
-        doc["doorState"] = state;
-        doc["ts"] = millis();
-        String payload;
-        serializeJson(doc, payload);
-        mqttClient.publish(topicOf("dp/report").c_str(), payload.c_str(), false);
-      }
-    }
-  } else {
-    // القراءة رجعت للحالة الأصلية - ألغي الـ debounce
-    doorDebouncePending = false;
-    doorDebounceCount = 0;
-  }
-}
-
-
-// ══════════════════════════════════════
-//            RELAY (Pulse Only)
-// ══════════════════════════════════════
-
-void startRelayPulse() {
-  // لو الريلاي شغال - تجاهل (حماية من الضغط المتكرر)
-  if (relayActive) {
-    Serial.println("[Relay] Already pulsing - ignored");
-    addLog("Open command ignored - already pulsing", "warning");
-    return;
-  }
-
-  digitalWrite(RELAY_PIN, HIGH);
+static void startRelayPulseImpl(RelayPulse& r) {
+  digitalWrite(r.pin, HIGH);
   setLED_action();
-  relayActive = true;
-  relayStartTime = millis();
-  Serial.println("[Relay] OPEN (2s pulse)");
-  addLog("Relay OPENED (2s pulse)", "info");
+  r.active  = true;
+  r.startMs = millis();
+  Serial.printf("[Relay] %s pulse start (%lums)\n", r.name, (unsigned long)RELAY_PULSE_MS);
 
-  // أبلغ السيرفر إن الباب انفتح (QoS 1)
-  if (mqttClient.connected()) {
-    StaticJsonDocument<128> doc;
-    doc["relay"] = "opened";
-    doc["ts"]    = millis();
-    String payload;
-    serializeJson(doc, payload);
-    mqttPublishReliable("dp/report", payload.c_str());
+  char logbuf[48];
+  snprintf(logbuf, sizeof(logbuf), "Relay %s pulse (%lums)", r.name, (unsigned long)RELAY_PULSE_MS);
+  addLog(logbuf, "info");
+
+  publishRelayEvent(r.name, "pulse");
+}
+
+void triggerOpenRelay() {
+  if (relayOpen.active) {
+    Serial.println("[Relay] Open already pulsing - ignored");
+    addLog("Open ignored - already pulsing", "warning");
+    return;
   }
+  if (relayClose.active) {
+    Serial.println("[Relay] Open blocked by Close interlock");
+    addLog("Open blocked: close active", "warning");
+    return;
+  }
+  startRelayPulseImpl(relayOpen);
+}
+
+void triggerCloseRelay() {
+  if (relayClose.active) {
+    Serial.println("[Relay] Close already pulsing - ignored");
+    addLog("Close ignored - already pulsing", "warning");
+    return;
+  }
+  if (relayOpen.active) {
+    Serial.println("[Relay] Close blocked by Open interlock");
+    addLog("Close blocked: open active", "warning");
+    return;
+  }
+  startRelayPulseImpl(relayClose);
+}
+
+void triggerToggleRelay() {
+  if (relayToggle.active) {
+    Serial.println("[Relay] Toggle already pulsing - ignored");
+    addLog("Toggle ignored - already pulsing", "warning");
+    return;
+  }
+  startRelayPulseImpl(relayToggle);
 }
 
 void handleRelay() {
-  if (relayActive && (millis() - relayStartTime >= RELAY_PULSE_MS)) {
-    digitalWrite(RELAY_PIN, LOW);
-    relayActive = false;
-    Serial.println("[Relay] CLOSED (auto)");
-    if (currentState == STATE_ONLINE) setLED_online();
-
-    // أبلغ السيرفر إن الباب قفل (QoS 1)
-    if (mqttClient.connected()) {
-      StaticJsonDocument<128> doc;
-      doc["relay"] = "closed";
-      doc["ts"]    = millis();
-      String payload;
-      serializeJson(doc, payload);
-      mqttPublishReliable("dp/report", payload.c_str());
+  uint32_t now = millis();
+  RelayPulse* all[3] = { &relayOpen, &relayClose, &relayToggle };
+  for (int i = 0; i < 3; i++) {
+    RelayPulse& r = *all[i];
+    if (r.active && (now - r.startMs >= RELAY_PULSE_MS)) {
+      digitalWrite(r.pin, LOW);
+      r.active = false;
+      Serial.printf("[Relay] %s pulse end\n", r.name);
+      publishRelayEvent(r.name, "idle");
     }
+  }
+  if (!anyRelayActive() && currentState == STATE_ONLINE) {
+    setLED_online();
   }
 }
 
@@ -859,8 +834,10 @@ void mqttPublishHeartbeat() {
   doc["rssi"]  = WiFi.RSSI();
   doc["fw"]    = FIRMWARE_VERSION;
   doc["heap"]  = ESP.getFreeHeap();
-  doc["relay"] = relayActive ? "opened" : "closed";
-  doc["doorState"] = lastDoorState ? "open" : "closed";
+  doc["relay"] = anyRelayActive() ? "opened" : "closed";
+  doc["openActive"]   = relayOpen.active;
+  doc["closeActive"]  = relayClose.active;
+  doc["toggleActive"] = relayToggle.active;
   doc["uptime"] = millis() / 1000;
   String payload;
   serializeJson(doc, payload);
@@ -1036,11 +1013,12 @@ void performOtaUpdate() {
     return;
   }
 
-  // Disable relay during OTA for safety
-  if (relayActive) {
-    digitalWrite(RELAY_PIN, LOW);
-    relayActive = false;
-    Serial.println("[OTA] Relay forced closed for safety");
+  // Disable all relays during OTA for safety
+  if (anyRelayActive()) {
+    digitalWrite(RELAY_OPEN_PIN,   LOW); relayOpen.active   = false;
+    digitalWrite(RELAY_CLOSE_PIN,  LOW); relayClose.active  = false;
+    digitalWrite(RELAY_TOGGLE_PIN, LOW); relayToggle.active = false;
+    Serial.println("[OTA] All relays forced closed for safety");
   }
 
   currentState = STATE_OTA_UPDATING;
@@ -1454,7 +1432,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     prefs.begin("config", true);
     bool adminLocked = prefs.getBool("adminLocked", false);
     prefs.end();
-    if (adminLocked && (action == "open" || action == "on" || action == "toggle" || action == "off")) {
+    if (adminLocked && (action == "open" || action == "on" || action == "close" || action == "toggle")) {
       Serial.println("[MQTT] Command blocked - device is admin locked");
       mqttPublishReliable("dp/report",
         "{\"error\":\"admin_locked\",\"message\":\"Device is locked by admin\"}");
@@ -1463,28 +1441,40 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 
   // Block relay commands during OTA
-  if (otaInProgress && (action == "open" || action == "on" || action == "toggle")) {
+  if (otaInProgress && (action == "open" || action == "on" || action == "close" || action == "toggle")) {
     Serial.println("[MQTT] Command blocked - OTA in progress");
     mqttPublishReliable("dp/report",
       "{\"error\":\"ota_in_progress\",\"message\":\"OTA update in progress\"}");
     return;
   }
 
-  // ── open / on / toggle = نفس الشي: pulse ثانيتين ──
-  if (action == "open" || action == "on" || action == "toggle") {
-    startRelayPulse();
-    rememberCommandRequest(requestId, "{\"status\":\"ok\",\"message\":\"Command executed\"}");
+  // ── open / on = pulse OPEN relay (D19) ──
+  if (action == "open" || action == "on") {
+    triggerOpenRelay();
+    rememberCommandRequest(requestId, "{\"status\":\"ok\",\"action\":\"open\"}");
+  }
+  // ── close = pulse CLOSE relay (D18) ──
+  else if (action == "close") {
+    triggerCloseRelay();
+    rememberCommandRequest(requestId, "{\"status\":\"ok\",\"action\":\"close\"}");
+  }
+  // ── toggle = pulse TOGGLE relay (D20) ──
+  else if (action == "toggle") {
+    triggerToggleRelay();
+    rememberCommandRequest(requestId, "{\"status\":\"ok\",\"action\":\"toggle\"}");
   }
   // ── status = أرسل حالة الجهاز ──
   else if (action == "status") {
     if (mqttClient.connected()) {
-      StaticJsonDocument<192> rDoc;
-      rDoc["relay"]     = relayActive ? "opened" : "closed";
-      rDoc["doorState"] = lastDoorState ? "open" : "closed";
-      rDoc["rssi"]      = WiFi.RSSI();
-      rDoc["heap"]      = ESP.getFreeHeap();
-      rDoc["fw"]        = FIRMWARE_VERSION;
-      rDoc["uptime"]    = millis() / 1000;
+      StaticJsonDocument<256> rDoc;
+      rDoc["relay"]         = anyRelayActive() ? "opened" : "closed";
+      rDoc["openActive"]    = relayOpen.active;
+      rDoc["closeActive"]   = relayClose.active;
+      rDoc["toggleActive"]  = relayToggle.active;
+      rDoc["rssi"]          = WiFi.RSSI();
+      rDoc["heap"]          = ESP.getFreeHeap();
+      rDoc["fw"]            = FIRMWARE_VERSION;
+      rDoc["uptime"]        = millis() / 1000;
       String rPayload;
       serializeJson(rDoc, rPayload);
       mqttPublishReliable("dp/report", rPayload.c_str());
@@ -1831,7 +1821,7 @@ void startLocalServer() {
       return;
     }
 
-    if (action == "open" || action == "on" || action == "toggle") {
+    if (action == "open" || action == "on" || action == "close" || action == "toggle") {
       if (otaInProgress) {
         localServer.send(503, "application/json", "{\"status\":\"error\",\"message\":\"OTA update in progress\"}");
         Serial.println("[LocalAPI] Command blocked - OTA in progress");
@@ -1845,12 +1835,29 @@ void startLocalServer() {
         Serial.println("[LocalAPI] Command blocked - admin locked");
         return;
       }
-      startRelayPulse();
-      addLog("Local API: open command executed", "info");
-      String response = "{\"status\":\"ok\",\"message\":\"Command executed locally\"}";
+
+      const char* dispatched = "open";
+      if (action == "close") {
+        triggerCloseRelay();
+        dispatched = "close";
+      } else if (action == "toggle") {
+        triggerToggleRelay();
+        dispatched = "toggle";
+      } else {
+        triggerOpenRelay();
+        dispatched = "open";
+      }
+
+      char logbuf[64];
+      snprintf(logbuf, sizeof(logbuf), "Local API: %s command executed", dispatched);
+      addLog(logbuf, "info");
+
+      char respBuf[80];
+      snprintf(respBuf, sizeof(respBuf), "{\"status\":\"ok\",\"action\":\"%s\"}", dispatched);
+      String response = respBuf;
       rememberCommandRequest(requestId, response);
       localServer.send(200, "application/json", response);
-      Serial.println("[LocalAPI] Command: open (local, authenticated)");
+      Serial.printf("[LocalAPI] Command: %s (local, authenticated)\n", dispatched);
     }
     else if (action == "restart") {
       addLog("Local API: restart command", "warning");
@@ -1864,13 +1871,15 @@ void startLocalServer() {
       prefs.begin("config", true);
       bool isLocked = prefs.getBool("adminLocked", false);
       prefs.end();
-      StaticJsonDocument<256> rDoc;
-      rDoc["relay"]       = relayActive ? "opened" : "closed";
-      rDoc["doorState"]   = lastDoorState ? "open" : "closed";
-      rDoc["rssi"]        = WiFi.RSSI();
-      rDoc["fw"]          = FIRMWARE_VERSION;
-      rDoc["local"]       = true;
-      rDoc["adminLocked"] = isLocked;
+      StaticJsonDocument<320> rDoc;
+      rDoc["relay"]         = anyRelayActive() ? "opened" : "closed";
+      rDoc["openActive"]    = relayOpen.active;
+      rDoc["closeActive"]   = relayClose.active;
+      rDoc["toggleActive"]  = relayToggle.active;
+      rDoc["rssi"]          = WiFi.RSSI();
+      rDoc["fw"]            = FIRMWARE_VERSION;
+      rDoc["local"]         = true;
+      rDoc["adminLocked"]   = isLocked;
       String response;
       serializeJson(rDoc, response);
       rememberCommandRequest(requestId, response);
@@ -1890,9 +1899,11 @@ void startLocalServer() {
     doc["name"]      = DEVICE_NAME;
     doc["type"]      = "relay";
     doc["fw"]        = FIRMWARE_VERSION;
-    doc["relay"]     = relayActive ? "opened" : "closed";
-    doc["doorState"] = lastDoorState ? "open" : "closed";
-    doc["isOnline"]  = true;
+    doc["relay"]         = anyRelayActive() ? "opened" : "closed";
+    doc["openActive"]    = relayOpen.active;
+    doc["closeActive"]   = relayClose.active;
+    doc["toggleActive"]  = relayToggle.active;
+    doc["isOnline"]      = true;
     doc["rssi"]      = WiFi.RSSI();
     doc["heap"]      = ESP.getFreeHeap();
     doc["uptime"]    = millis() / 1000;
@@ -2559,10 +2570,11 @@ void handleStateMachine() {
 // ══════════════════════════════════════
 
 void setup() {
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);
+  // Relays: configure LOW first to avoid floating glitches during boot.
+  pinMode(RELAY_OPEN_PIN,   OUTPUT); digitalWrite(RELAY_OPEN_PIN,   LOW);
+  pinMode(RELAY_CLOSE_PIN,  OUTPUT); digitalWrite(RELAY_CLOSE_PIN,  LOW);
+  pinMode(RELAY_TOGGLE_PIN, OUTPUT); digitalWrite(RELAY_TOGGLE_PIN, LOW);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(DOOR_SENSOR_PIN, INPUT);   // SW-420 sensor
   pinMode(LED_R, OUTPUT);
   pinMode(LED_G, OUTPUT);
   pinMode(LED_B, OUTPUT);
@@ -2709,6 +2721,5 @@ void loop() {
   handleStateMachine();
   handleRelay();
   handleButton();
-  handleDoorSensor();
   delay(10);
 }

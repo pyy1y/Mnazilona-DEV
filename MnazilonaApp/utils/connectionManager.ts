@@ -16,8 +16,8 @@ import {
 // Command Whitelist
 // ======================================
 const ALLOWED_COMMANDS = new Set([
-  // Garage
-  'open', 'close', 'stop',
+  // Garage (3-relay: Open / Close / Toggle)
+  'open', 'close', 'toggle',
   // Light
   'on', 'off',
   // Dimmer
