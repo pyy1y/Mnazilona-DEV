@@ -99,7 +99,7 @@ String deviceSecret = "";
 // Production: use HTTPS with your domain
 //#define SERVER_BASE_URL   "https://your-domain.com"
 // Development: uncomment for local HTTP testing
-#define SERVER_BASE_URL   "http://192.168.100.116:3000"
+#define SERVER_BASE_URL   "https://mnazilona.xyz/api"
 #define SERVER_INQUIRY_PATH "/devices/inquiry"
 #define SERVER_OTA_CHECK_PATH "/devices/ota/check"
 
@@ -132,7 +132,7 @@ const char* ota_public_key = "";
 //
 // MUST be set back to 0 for production builds.
 #ifndef ALLOW_INSECURE_OTA_HTTP
-#define ALLOW_INSECURE_OTA_HTTP 1   // 1 = HTTP allowed (DEV), 0 = HTTPS-only (PROD default)
+#define ALLOW_INSECURE_OTA_HTTP 0   // 1 = HTTP allowed (DEV), 0 = HTTPS-only (PROD default)
 #endif
 
 // ═══════════════════════════════════════
@@ -142,13 +142,24 @@ const char* ota_public_key = "";
 // ═══════════════════════════════════════
 
 // ═══════════════════════════════════════
-// Hardware Pins — 3-Relay Garage Controller (AQY212SZ SSRs)
-// Active-HIGH: digitalWrite(pin, HIGH) energizes the SSR opto.
+// Hardware Pins — 3-Relay Garage Controller
+//
+// Drive technique: software open-drain.
+//   ON  = pinMode(pin, OUTPUT) + digitalWrite(LOW)
+//   OFF = pinMode(pin, INPUT)       (high-Z; GPIO out of the circuit)
+//
+// Why open-drain: relay modules (SRD-05VDC-SL-C type) pull their IN line
+// up to VCC=5V internally through the optocoupler LED. Driving the GPIO
+// HIGH at 3.3V only leaves 1.7V across the LED — still above its
+// forward voltage, so the relay never fully releases. Switching the pin
+// to INPUT instead removes the GPIO from the circuit entirely and lets
+// the module's own 5V pull-up hold IN cleanly HIGH. Use the
+// relayOn() / relayOff() helpers — never write the pins directly.
 // ═══════════════════════════════════════
-#define RELAY_OPEN_PIN    19    // D19 → R6 → OPEN SSR
-#define RELAY_CLOSE_PIN   18    // D18 → R5 → CLOSE SSR
-#define RELAY_TOGGLE_PIN  20    // D20 → R7 → TOGGLE SSR
-#define BUTTON_PIN        5     // D5  → tactile switch (R4 10k pull-up + C1 100nF)
+#define RELAY_OPEN_PIN    10    // D10 → OPEN module IN
+#define RELAY_CLOSE_PIN   11    // D11 → CLOSE module IN
+#define RELAY_TOGGLE_PIN  21    // D21 → TOGGLE module IN
+#define BUTTON_PIN        13    // D13 → tactile switch (R4 10k pull-up + C1 100nF)
 #define LED_R             6     // D6  → R1 (Red)
 #define LED_G             7     // D7  → R2 (Green)
 #define LED_B             4     // D4  → R3 (Blue)
@@ -563,9 +574,21 @@ void clearAllSettings() {
 
 // ══════════════════════════════════════
 //   RELAYS (Pulse Only — Open / Close / Toggle)
-//   AQY212SZ SSRs driven active-HIGH.
+//   Software open-drain: pin sinks LOW to fire, goes high-Z to release.
 //   Open ↔ Close are software-interlocked.
 // ══════════════════════════════════════
+
+// Tested working approach with SRD-05VDC modules + ESP32-C6 3.3V GPIO:
+// switching the pin between OUTPUT-LOW and INPUT (high-Z) avoids the
+// 3.3V vs 5V LED-bias issue that traps the relay in the ON state.
+static inline void relayOn(uint8_t pin) {
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, LOW);
+}
+
+static inline void relayOff(uint8_t pin) {
+  pinMode(pin, INPUT);  // high-Z; module's internal pull-up to 5V wins.
+}
 
 static void publishRelayEvent(const char* relayName, const char* phase) {
   // phase = "pulse" (started) | "idle" (released)
@@ -581,7 +604,7 @@ static void publishRelayEvent(const char* relayName, const char* phase) {
 }
 
 static void startRelayPulseImpl(RelayPulse& r) {
-  digitalWrite(r.pin, HIGH);
+  relayOn(r.pin);
   setLED_action();
   r.active  = true;
   r.startMs = millis();
@@ -637,7 +660,7 @@ void handleRelay() {
   for (int i = 0; i < 3; i++) {
     RelayPulse& r = *all[i];
     if (r.active && (now - r.startMs >= RELAY_PULSE_MS)) {
-      digitalWrite(r.pin, LOW);
+      relayOff(r.pin);
       r.active = false;
       Serial.printf("[Relay] %s pulse end\n", r.name);
       publishRelayEvent(r.name, "idle");
@@ -1015,9 +1038,9 @@ void performOtaUpdate() {
 
   // Disable all relays during OTA for safety
   if (anyRelayActive()) {
-    digitalWrite(RELAY_OPEN_PIN,   LOW); relayOpen.active   = false;
-    digitalWrite(RELAY_CLOSE_PIN,  LOW); relayClose.active  = false;
-    digitalWrite(RELAY_TOGGLE_PIN, LOW); relayToggle.active = false;
+    relayOff(RELAY_OPEN_PIN);   relayOpen.active   = false;
+    relayOff(RELAY_CLOSE_PIN);  relayClose.active  = false;
+    relayOff(RELAY_TOGGLE_PIN); relayToggle.active = false;
     Serial.println("[OTA] All relays forced closed for safety");
   }
 
@@ -2570,10 +2593,11 @@ void handleStateMachine() {
 // ══════════════════════════════════════
 
 void setup() {
-  // Relays: configure LOW first to avoid floating glitches during boot.
-  pinMode(RELAY_OPEN_PIN,   OUTPUT); digitalWrite(RELAY_OPEN_PIN,   LOW);
-  pinMode(RELAY_CLOSE_PIN,  OUTPUT); digitalWrite(RELAY_CLOSE_PIN,  LOW);
-  pinMode(RELAY_TOGGLE_PIN, OUTPUT); digitalWrite(RELAY_TOGGLE_PIN, LOW);
+  // Relays start in high-Z so the module's 5V pull-up holds IN HIGH from
+  // power-up. No driving from the ESP at boot → no glitch.
+  relayOff(RELAY_OPEN_PIN);
+  relayOff(RELAY_CLOSE_PIN);
+  relayOff(RELAY_TOGGLE_PIN);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(LED_R, OUTPUT);
   pinMode(LED_G, OUTPUT);
