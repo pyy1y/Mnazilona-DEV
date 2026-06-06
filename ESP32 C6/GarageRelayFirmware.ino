@@ -29,6 +29,8 @@
 #include <ESPmDNS.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
 #include <mbedtls/md.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/sha256.h>
@@ -306,6 +308,44 @@ inline bool anyRelayActive() {
   return relayOpen.active || relayClose.active || relayToggle.active;
 }
 
+// ═══════════════════════════════════════
+// ESP-NOW Door Sensor (paired ESP32-C3 node)
+//
+// The C3 node reads a NO dry contact, deep-sleeps between events, and
+// sends a single packet per state change. We treat it as part of the
+// same logical garage device: doorState is reported through the
+// existing heartbeat / dp/report / local /status surfaces. No new MQTT
+// topic, no new backend entity.
+//
+// Packet layout MUST match SensorNodeC3.ino byte-for-byte.
+// ═══════════════════════════════════════
+typedef struct __attribute__((packed)) {
+  uint8_t  version;       // 1
+  uint8_t  msgType;       // 1 = sensor_state
+  uint8_t  doorState;     // 0 = closed, 1 = open
+  uint8_t  reserved;
+  uint32_t seq;
+  uint32_t uptimeSec;
+} SensorMsg;
+
+#define DOOR_STATE_CLOSED  0
+#define DOOR_STATE_OPEN    1
+
+// 0xFF = no sensor packet ever received yet (don't publish doorState)
+// Persisted across MQTT reconnects, NOT across device reboot.
+uint8_t  doorSensorState        = 0xFF;
+uint32_t doorSensorLastSeq      = 0;
+uint32_t doorSensorLastPacketMs = 0;
+uint8_t  sensorPeerMac[6]       = {0};
+bool     sensorPeerConfigured   = false;
+bool     espNowInitialized      = false;
+
+const char* doorStateString() {
+  if (doorSensorState == DOOR_STATE_OPEN)   return "open";
+  if (doorSensorState == DOOR_STATE_CLOSED) return "closed";
+  return nullptr;  // unknown — caller must omit the field
+}
+
 uint32_t lastHeartbeatMs     = 0;
 uint32_t lastMqttReconnectMs = 0;
 uint32_t lastWifiRetryMs     = 0;
@@ -458,11 +498,40 @@ bool loadSecrets() {
   return true;
 }
 
+// Load paired ESP-NOW sensor MAC from NVS (separate namespace, optional).
+// Returns true if a valid 6-byte MAC string ("AA:BB:CC:DD:EE:FF") was stored.
+// Absence is NOT an error — the gateway just runs without the door sensor.
+bool loadSensorPeer() {
+  prefs.begin("sensor", true);
+  String macStr = prefs.getString("peer_mac", "");
+  prefs.end();
+
+  if (macStr.length() != 17) {
+    sensorPeerConfigured = false;
+    return false;
+  }
+
+  int v[6];
+  if (sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x",
+             &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) {
+    sensorPeerConfigured = false;
+    return false;
+  }
+  for (int i = 0; i < 6; i++) sensorPeerMac[i] = (uint8_t)v[i];
+  sensorPeerConfigured = true;
+
+  Serial.printf("[ESP-NOW] Paired sensor MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                sensorPeerMac[0], sensorPeerMac[1], sensorPeerMac[2],
+                sensorPeerMac[3], sensorPeerMac[4], sensorPeerMac[5]);
+  return true;
+}
+
 // Provision device identity via Serial (run once during manufacturing).
-// Accepted forms (any combination of serial/secret, comma-separated):
+// Accepted forms (any combination, comma-separated):
 //   PROVISION:serial=<SN-XXX>
 //   PROVISION:secret=<hex32>
 //   PROVISION:serial=<SN-XXX>,secret=<hex32>
+//   PROVISION:sensor_mac=<AA:BB:CC:DD:EE:FF>   ← ESP-NOW C3 sensor pairing
 // (PoP code is no longer used; any extra params are ignored.)
 void checkSerialProvisioning() {
   if (!Serial.available()) return;
@@ -474,6 +543,7 @@ void checkSerialProvisioning() {
   String params    = line.substring(10);
   String newSerial = "";
   String newSecret = "";
+  String newSensor = "";
 
   while (params.length() > 0) {
     int comma = params.indexOf(',');
@@ -481,24 +551,37 @@ void checkSerialProvisioning() {
     params      = (comma < 0) ? ""     : params.substring(comma + 1);
     pair.trim();
 
-    if      (pair.startsWith("serial=")) newSerial = pair.substring(7);
-    else if (pair.startsWith("secret=")) newSecret = pair.substring(7);
+    if      (pair.startsWith("serial="))     newSerial = pair.substring(7);
+    else if (pair.startsWith("secret="))     newSecret = pair.substring(7);
+    else if (pair.startsWith("sensor_mac=")) newSensor = pair.substring(11);
   }
 
-  if (newSerial.length() == 0 && newSecret.length() == 0) {
-    Serial.println("[PROVISION] Error: provide serial=<SN> and/or secret=<hex32>");
+  if (newSerial.length() == 0 && newSecret.length() == 0 && newSensor.length() == 0) {
+    Serial.println("[PROVISION] Error: provide serial=, secret=, and/or sensor_mac=");
     return;
   }
   if (newSecret.length() > 0 && newSecret.length() < 32) {
     Serial.println("[PROVISION] Error: secret must be 32+ chars");
     return;
   }
+  if (newSensor.length() > 0 && newSensor.length() != 17) {
+    Serial.println("[PROVISION] Error: sensor_mac must be AA:BB:CC:DD:EE:FF");
+    return;
+  }
 
-  prefs.begin("secrets", false);
-  if (newSerial.length() > 0) prefs.putString("serial", newSerial);
-  if (newSecret.length() > 0) prefs.putString("secret", newSecret);
-  prefs.remove("pop");  // clean up any legacy PoP value from older firmware
-  prefs.end();
+  if (newSerial.length() > 0 || newSecret.length() > 0) {
+    prefs.begin("secrets", false);
+    if (newSerial.length() > 0) prefs.putString("serial", newSerial);
+    if (newSecret.length() > 0) prefs.putString("secret", newSecret);
+    prefs.remove("pop");  // clean up any legacy PoP value from older firmware
+    prefs.end();
+  }
+
+  if (newSensor.length() > 0) {
+    prefs.begin("sensor", false);
+    prefs.putString("peer_mac", newSensor);
+    prefs.end();
+  }
 
   if (newSerial.length() > 0) {
     serialNumber = newSerial;
@@ -509,6 +592,10 @@ void checkSerialProvisioning() {
     Serial.printf("[PROVISION] Secret burned to NVS: %s...%s\n",
                   newSecret.substring(0, 4).c_str(),
                   newSecret.substring(newSecret.length() - 4).c_str());
+  }
+  if (newSensor.length() > 0) {
+    Serial.printf("[PROVISION] Sensor MAC burned to NVS: %s\n", newSensor.c_str());
+    Serial.println("[PROVISION] Restart to apply ESP-NOW peer change.");
   }
 }
 
@@ -826,6 +913,167 @@ int inquireServer() {
 
 
 // ══════════════════════════════════════
+//            ESP-NOW (Door Sensor RX)
+// ══════════════════════════════════════
+
+// Forward declaration — defined later, in the MQTT section.
+static void publishDoorChange(uint8_t state);
+
+// ESP-NOW receive callback (Arduino-ESP32 v3.x signature).
+// Runs in the WiFi task context — keep it tight: validate, update RAM
+// globals, hand off to the main loop via flags or direct publish call.
+// We DO publish here because mqttClient.publish is thread-safe enough for
+// our QoS 0 dp/report (single producer per topic). If you see issues,
+// switch to a deferred flag pattern.
+static uint32_t espNowRxTotal = 0;
+static void onEspNowRecv(const esp_now_recv_info_t* info,
+                         const uint8_t* data, int len) {
+  espNowRxTotal++;
+  Serial.printf("[ESP-NOW] RX #%lu from %02X:%02X:%02X:%02X:%02X:%02X len=%d\n",
+                (unsigned long)espNowRxTotal,
+                info->src_addr[0], info->src_addr[1], info->src_addr[2],
+                info->src_addr[3], info->src_addr[4], info->src_addr[5], len);
+
+  if (!sensorPeerConfigured) return;
+
+  // MAC whitelist — drop anything not from the paired C3 node.
+  if (memcmp(info->src_addr, sensorPeerMac, 6) != 0) {
+    Serial.printf("[ESP-NOW] Drop: unknown MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  info->src_addr[0], info->src_addr[1], info->src_addr[2],
+                  info->src_addr[3], info->src_addr[4], info->src_addr[5]);
+    return;
+  }
+
+  if (len != (int)sizeof(SensorMsg)) {
+    Serial.printf("[ESP-NOW] Drop: bad length %d (expected %u)\n",
+                  len, (unsigned)sizeof(SensorMsg));
+    return;
+  }
+
+  SensorMsg msg;
+  memcpy(&msg, data, sizeof(msg));
+
+  if (msg.version != 1 || msg.msgType != 1) {
+    Serial.printf("[ESP-NOW] Drop: unknown ver=%u type=%u\n",
+                  msg.version, msg.msgType);
+    return;
+  }
+  if (msg.doorState != DOOR_STATE_OPEN && msg.doorState != DOOR_STATE_CLOSED) {
+    Serial.printf("[ESP-NOW] Drop: bad doorState=%u\n", msg.doorState);
+    return;
+  }
+
+  // Replay / reset handling. C3 increments seq monotonically per boot and
+  // keeps it in RTC slow memory across deep sleep, but on power loss it
+  // resets to 0. Detect that as a huge backwards jump (>1000) and re-anchor.
+  if (msg.seq <= doorSensorLastSeq) {
+    uint32_t backwardsJump = doorSensorLastSeq - msg.seq;
+    if (backwardsJump < 1000) {
+      Serial.printf("[ESP-NOW] Drop: replay/old seq=%lu last=%lu\n",
+                    (unsigned long)msg.seq, (unsigned long)doorSensorLastSeq);
+      return;
+    }
+    Serial.printf("[ESP-NOW] Sensor seq reset detected (last=%lu now=%lu) — re-anchoring\n",
+                  (unsigned long)doorSensorLastSeq, (unsigned long)msg.seq);
+  }
+
+  uint8_t prevState = doorSensorState;
+  doorSensorState        = msg.doorState;
+  doorSensorLastSeq      = msg.seq;
+  doorSensorLastPacketMs = millis();
+
+  Serial.printf("[ESP-NOW] Door=%s seq=%lu c3_uptime=%lus\n",
+                msg.doorState == DOOR_STATE_OPEN ? "OPEN" : "CLOSED",
+                (unsigned long)msg.seq, (unsigned long)msg.uptimeSec);
+
+  // Event-driven dp/report only when state actually changed (or first ever).
+  if (prevState != doorSensorState) {
+    char logbuf[40];
+    snprintf(logbuf, sizeof(logbuf), "Door sensor: %s",
+             msg.doorState == DOOR_STATE_OPEN ? "open" : "closed");
+    addLog(logbuf, "info");
+    publishDoorChange(doorSensorState);
+  }
+}
+
+// Initialize the ESP-NOW receiver. WiFi must already be in STA mode
+// (associated to the AP or at least started) — ESP-NOW piggybacks on
+// that radio + channel. Idempotent: safe to call repeatedly.
+bool initEspNowReceiver() {
+  if (espNowInitialized) return true;
+  if (!sensorPeerConfigured) {
+    Serial.println("[ESP-NOW] Not initializing — no sensor peer in NVS");
+    return false;
+  }
+  if (WiFi.getMode() != WIFI_STA && WiFi.getMode() != WIFI_AP_STA) {
+    Serial.println("[ESP-NOW] Cannot init — WiFi not in STA mode");
+    return false;
+  }
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[ESP-NOW] init failed");
+    return false;
+  }
+  esp_now_register_recv_cb(onEspNowRecv);
+
+  // Disable WiFi modem sleep. Default STA power-save cycles the radio off
+  // between beacons, silently dropping incoming ESP-NOW frames from a
+  // sleeping sensor that sends a single packet then deep-sleeps again.
+  // Costs a few mA continuous — acceptable for a wall-powered gateway.
+  esp_wifi_set_ps(WIFI_PS_NONE);
+
+  // Force legacy 802.11b/g/n on the STA interface. ESP32-C6 supports WiFi 6
+  // (HE) and the default protocol mask can include it; ESP-NOW frames from
+  // an ESP32-C3 sender are sent at legacy DSSS rates and were observed to
+  // be dropped silently when the C6 was advertising HE-capable. Limiting
+  // to B/G/N matches what every router we deploy against still supports.
+  esp_wifi_set_protocol(WIFI_IF_STA,
+                        WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+
+  // Add the peer so the radio accepts incoming frames from it.
+  // Channel 0 = use current STA channel (whatever the AP put us on).
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, sensorPeerMac, 6);
+  peer.channel = 0;
+  peer.encrypt = false;
+  peer.ifidx   = WIFI_IF_STA;
+  if (!esp_now_is_peer_exist(sensorPeerMac)) {
+    esp_err_t r = esp_now_add_peer(&peer);
+    if (r != ESP_OK) {
+      Serial.printf("[ESP-NOW] add_peer failed: %d\n", r);
+      esp_now_deinit();
+      return false;
+    }
+  }
+
+  // Also accept broadcast frames — used by the C3 sensor as a diagnostic
+  // fallback so we can tell "RF link is dead" from "unicast addressing
+  // is mis-configured". Broadcast peer is required on some core builds
+  // for the receive callback to fire on FF:FF:FF:FF:FF:FF destinations.
+  uint8_t bcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  if (!esp_now_is_peer_exist(bcastMac)) {
+    esp_now_peer_info_t bpeer = {};
+    memcpy(bpeer.peer_addr, bcastMac, 6);
+    bpeer.channel = 0;
+    bpeer.encrypt = false;
+    bpeer.ifidx   = WIFI_IF_STA;
+    esp_now_add_peer(&bpeer);
+  }
+
+  // Crank gateway TX power too. Receivers don't need it for receiving,
+  // but it improves the implicit ACK that ESP-NOW unicast relies on.
+  esp_wifi_set_max_tx_power(84);
+
+  espNowInitialized = true;
+  uint8_t pri = 0, sec = 0;
+  wifi_second_chan_t s2;
+  esp_wifi_get_channel(&pri, &s2);
+  Serial.printf("[ESP-NOW] Receiver ready on channel %u\n", pri);
+  return true;
+}
+
+
+// ══════════════════════════════════════
 //            MQTT
 // ══════════════════════════════════════
 
@@ -847,7 +1095,7 @@ bool mqttPublishReliable(const String& subtopic, const char* payload) {
 
 void mqttPublishHeartbeat() {
   if (!mqttClient.connected()) return;
-  StaticJsonDocument<256> doc;
+  StaticJsonDocument<320> doc;
   uint32_t epoch = getEpochTime();
   if (epoch > 0) {
     doc["ts"] = epoch;        // Real epoch time (NTP synced)
@@ -862,9 +1110,35 @@ void mqttPublishHeartbeat() {
   doc["closeActive"]  = relayClose.active;
   doc["toggleActive"] = relayToggle.active;
   doc["uptime"] = millis() / 1000;
+
+  // Include door sensor state only when known. Backend schema accepts
+  // "open" | "closed"; we omit the field if no packet has ever arrived
+  // so the DB keeps its last known value (or null) instead of being
+  // overwritten with a guess.
+  const char* ds = doorStateString();
+  if (ds) doc["doorState"] = ds;
+
   String payload;
   serializeJson(doc, payload);
   mqttClient.publish(topicOf("heartbeat").c_str(), payload.c_str());
+}
+
+// Event-driven door state report. Called from the ESP-NOW receive callback
+// whenever the C3 sensor reports a transition. Uses dp/report so the backend
+// path is the same as a relay event.
+static void publishDoorChange(uint8_t state) {
+  if (!mqttClient.connected()) return;
+  const char* ds = (state == DOOR_STATE_OPEN) ? "open"
+                 : (state == DOOR_STATE_CLOSED) ? "closed" : nullptr;
+  if (!ds) return;
+
+  StaticJsonDocument<96> doc;
+  doc["doorState"] = ds;
+  doc["source"]    = "sensor";
+  doc["ts"]        = millis();
+  String payload;
+  serializeJson(doc, payload);
+  mqttPublishReliable("dp/report", payload.c_str());
 }
 
 // ══════════════════════════════════════
@@ -1917,7 +2191,7 @@ void startLocalServer() {
   localServer.on("/status", HTTP_GET, []() {
     if (!verifyLocalAuth()) return;
 
-    StaticJsonDocument<384> doc;
+    StaticJsonDocument<448> doc;
     doc["serial"]    = serialNumber.c_str();
     doc["name"]      = DEVICE_NAME;
     doc["type"]      = "relay";
@@ -1933,6 +2207,8 @@ void startLocalServer() {
     doc["ip"]        = WiFi.localIP().toString();
     doc["local"]     = true;
     doc["mqttConnected"] = mqttClient.connected();
+    const char* ds = doorStateString();
+    if (ds) doc["doorState"] = ds;
     String response;
     serializeJson(doc, response);
     localServer.send(200, "application/json", response);
@@ -2518,6 +2794,27 @@ void handleStateMachine() {
       // Rollback timeout check (if pending verification)
       checkOtaRollbackTimeout();
 
+      // Ensure ESP-NOW receiver is up. Cheap idempotent check that
+      // recovers from BLE-provisioning re-init or any WiFi mode bounce.
+      if (sensorPeerConfigured && !espNowInitialized) {
+        initEspNowReceiver();
+      }
+
+      // ESP-NOW debug heartbeat — prints actual STA channel + total RX
+      // count every 5s so we can correlate "C3 sent at T" with "C6 saw
+      // anything at T". Will be removed once link is stable.
+      {
+        static uint32_t lastEspNowDbg = 0;
+        if (millis() - lastEspNowDbg > 5000) {
+          lastEspNowDbg = millis();
+          uint8_t pri = 0;
+          wifi_second_chan_t sec;
+          esp_wifi_get_channel(&pri, &sec);
+          Serial.printf("[ESP-NOW] Status: channel=%d sec=%d rxTotal=%lu\n",
+                        pri, (int)sec, (unsigned long)espNowRxTotal);
+        }
+      }
+
       // Start local API server if not running
       if (!localServerRunning) {
         startLocalServer();
@@ -2651,6 +2948,11 @@ void setup() {
     setLED_off();
   }
 
+  // Optional ESP-NOW door sensor peer. Absence is fine — gateway
+  // runs without it; just no doorState will ever be reported.
+  // Command: PROVISION:sensor_mac=<AA:BB:CC:DD:EE:FF>
+  loadSensorPeer();
+
   // ═══════════════════════════════════════
   // TLS SETUP
   // Configure WiFiClientSecure with CA certificate
@@ -2698,6 +3000,13 @@ void setup() {
   Serial.println("  Provisioning: BLE");
   Serial.printf("  TLS: %s\n", strlen(ca_cert) > 60 ? "Enabled" : "Insecure (dev)");
   Serial.printf("  OTA Signing: %s\n", strlen(ota_public_key) > 60 ? "Enabled" : "Disabled");
+  if (sensorPeerConfigured) {
+    Serial.printf("  Sensor: %02X:%02X:%02X:%02X:%02X:%02X (ESP-NOW)\n",
+                  sensorPeerMac[0], sensorPeerMac[1], sensorPeerMac[2],
+                  sensorPeerMac[3], sensorPeerMac[4], sensorPeerMac[5]);
+  } else {
+    Serial.println("  Sensor: not paired (PROVISION:sensor_mac=...)");
+  }
   Serial.println("======================================\n");
 
   if (loadSettings()) {
@@ -2706,6 +3015,10 @@ void setup() {
     if (connectWiFi(storedSSID, storedPassword)) {
       // Sync time via NTP (non-blocking, runs in background)
       syncNTP();
+
+      // Init ESP-NOW receiver now that WiFi STA is active.
+      // Idempotent + no-op if no sensor peer was provisioned.
+      initEspNowReceiver();
 
       if (mqttHost.length() == 0) {
         int inqResult = inquireServer();
@@ -2745,5 +3058,6 @@ void loop() {
   handleStateMachine();
   handleRelay();
   handleButton();
+  checkSerialProvisioning();   // accept PROVISION:... lines at any time
   delay(10);
 }
