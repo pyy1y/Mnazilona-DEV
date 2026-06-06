@@ -13,7 +13,7 @@ const getStoredToken = () =>
 const getSocketBaseUrl = () => {
   const fallbackOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
   const url = new URL(API_BASE, fallbackOrigin);
-  url.pathname = url.pathname.replace(/\/api(?:\/v\d+)?\/?$/, '');
+  url.pathname = url.pathname.replace(/(?:\/api)?(?:\/v\d+)?\/?$/, '');
   return url.pathname === '/' ? url.origin : `${url.origin}${url.pathname.replace(/\/$/, '')}`;
 };
 
